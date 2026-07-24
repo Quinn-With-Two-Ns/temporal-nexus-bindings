@@ -1,0 +1,222 @@
+package io.github.quinn_with_two_ns.temporal.nexus.internal;
+
+import java.lang.reflect.Array;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.math.BigDecimal;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import org.jspecify.annotations.Nullable;
+
+/** Compiled payload and request-metadata expression used by generated Nexus bindings. */
+final class InputExpression {
+  private final ExpressionModel model;
+
+  static InputExpression compile(String source) {
+    return new InputExpression(ExpressionModel.parse(source));
+  }
+
+  private InputExpression(ExpressionModel model) {
+    this.model = model;
+  }
+
+  @Nullable Object evaluate(@Nullable Object input, Class<?> targetType) {
+    return evaluate(input, null, Collections.<String, String>emptyMap(), targetType);
+  }
+
+  @Nullable Object evaluate(
+      @Nullable Object input,
+      @Nullable String requestId,
+      Map<String, String> headers,
+      Class<?> targetType) {
+    @Nullable Object value;
+    if (model.singleExpression) {
+      value = evaluate(model.segments.get(0), input, requestId, headers);
+    } else {
+      StringBuilder result = new StringBuilder();
+      for (ExpressionModel.Segment segment : model.segments) {
+        @Nullable Object part = evaluate(segment, input, requestId, headers);
+        if (part != null) {
+          result.append(part);
+        }
+      }
+      value = result.toString();
+    }
+    return coerce(value, targetType, model.source);
+  }
+
+  static @Nullable Object coerce(@Nullable Object value, Class<?> targetType, String source) {
+    Class<?> boxedTarget = box(targetType);
+    if (value == null) {
+      if (targetType.isPrimitive()) {
+        throw new IllegalArgumentException(
+            "expression \"" + source + "\" evaluated to null for " + targetType.getName());
+      }
+      return null;
+    }
+    if (boxedTarget.isInstance(value)) {
+      return value;
+    }
+    if (boxedTarget == String.class) {
+      return String.valueOf(value);
+    }
+    if (value instanceof Number && Number.class.isAssignableFrom(boxedTarget)) {
+      return convertNumber((Number) value, boxedTarget, source);
+    }
+    if (boxedTarget == Character.class && value instanceof String) {
+      String string = (String) value;
+      if (string.length() == 1) {
+        return string.charAt(0);
+      }
+    }
+    throw new IllegalArgumentException(
+        "expression \""
+            + source
+            + "\" produced "
+            + value.getClass().getName()
+            + ", which cannot be converted to "
+            + targetType.getName());
+  }
+
+  private static Number convertNumber(Number value, Class<?> targetType, String source) {
+    BigDecimal decimal = new BigDecimal(value.toString());
+    try {
+      if (targetType == Byte.class) return decimal.byteValueExact();
+      if (targetType == Short.class) return decimal.shortValueExact();
+      if (targetType == Integer.class) return decimal.intValueExact();
+      if (targetType == Long.class) return decimal.longValueExact();
+      if (targetType == Float.class) return decimal.floatValue();
+      if (targetType == Double.class) return decimal.doubleValue();
+      if (targetType == BigDecimal.class) return decimal;
+    } catch (ArithmeticException e) {
+      throw new IllegalArgumentException(
+          "expression \"" + source + "\" cannot be converted losslessly to " + targetType.getName(),
+          e);
+    }
+    throw new IllegalArgumentException("unsupported numeric target " + targetType.getName());
+  }
+
+  private static Class<?> box(Class<?> type) {
+    if (!type.isPrimitive()) return type;
+    if (type == boolean.class) return Boolean.class;
+    if (type == byte.class) return Byte.class;
+    if (type == short.class) return Short.class;
+    if (type == int.class) return Integer.class;
+    if (type == long.class) return Long.class;
+    if (type == float.class) return Float.class;
+    if (type == double.class) return Double.class;
+    if (type == char.class) return Character.class;
+    return type;
+  }
+
+  private static @Nullable Object evaluate(
+      ExpressionModel.Segment segment,
+      @Nullable Object input,
+      @Nullable String requestId,
+      Map<String, String> headers) {
+    if (segment instanceof ExpressionModel.LiteralSegment) {
+      return ((ExpressionModel.LiteralSegment) segment).value;
+    }
+    if (segment instanceof ExpressionModel.ConstantSegment) {
+      return ((ExpressionModel.ConstantSegment) segment).value;
+    }
+    if (segment instanceof ExpressionModel.PayloadSegment) {
+      return input;
+    }
+    return evaluatePath((ExpressionModel.PathSegment) segment, input, requestId, headers);
+  }
+
+  private static @Nullable Object evaluatePath(
+      ExpressionModel.PathSegment path,
+      @Nullable Object input,
+      @Nullable String requestId,
+      Map<String, String> headers) {
+    @Nullable Object value;
+    if (path.root == ExpressionModel.Root.REQUEST_ID) {
+      value = requestId;
+    } else if (path.root == ExpressionModel.Root.HEADERS) {
+      value = headers;
+    } else {
+      value = input;
+    }
+    for (ExpressionModel.PathStep step : path.steps) {
+      if (value == null) {
+        throw new IllegalArgumentException("cannot traverse through null");
+      }
+      if (step instanceof ExpressionModel.PropertyStep) {
+        value = readProperty(value, ((ExpressionModel.PropertyStep) step).property);
+      } else if (step instanceof ExpressionModel.MapKeyStep) {
+        value = readMapKey(value, ((ExpressionModel.MapKeyStep) step).key);
+      } else {
+        value = readIndex(value, ((ExpressionModel.IndexStep) step).index);
+      }
+    }
+    return value;
+  }
+
+  private static @Nullable Object readMapKey(Object value, String key) {
+    if (!(value instanceof Map)) {
+      throw new IllegalArgumentException("map key access requires a Map");
+    }
+    Map<?, ?> map = (Map<?, ?>) value;
+    if (!map.containsKey(key)) {
+      throw new IllegalArgumentException("missing map key \"" + key + "\"");
+    }
+    return map.get(key);
+  }
+
+  private static @Nullable Object readIndex(Object value, int index) {
+    int size;
+    if (value instanceof List) {
+      List<?> list = (List<?>) value;
+      size = list.size();
+      if (index < size) {
+        return list.get(index);
+      }
+    } else if (value.getClass().isArray()) {
+      size = Array.getLength(value);
+      if (index < size) {
+        return Array.get(value, index);
+      }
+    } else {
+      throw new IllegalArgumentException("index access requires a List or array");
+    }
+    throw new IllegalArgumentException("index " + index + " out of bounds for size " + size);
+  }
+
+  private static @Nullable Object readProperty(Object value, String property) {
+    Class<?> type = value.getClass();
+    String suffix = property.substring(0, 1).toUpperCase(Locale.ROOT) + property.substring(1);
+    @Nullable Method method = findMethod(type, "get" + suffix);
+    if (method == null) {
+      method = findMethod(type, "is" + suffix);
+    }
+    if (method != null) {
+      try {
+        return method.invoke(value);
+      } catch (ReflectiveOperationException e) {
+        throw new IllegalArgumentException("failed reading property \"" + property + "\"", e);
+      }
+    }
+    try {
+      Field field = type.getField(property);
+      return field.get(value);
+    } catch (NoSuchFieldException e) {
+      throw new IllegalArgumentException(
+          "property \"" + property + "\" does not exist on " + type.getName(), e);
+    } catch (ReflectiveOperationException e) {
+      throw new IllegalArgumentException("failed reading field \"" + property + "\"", e);
+    }
+  }
+
+  private static @Nullable Method findMethod(Class<?> type, String name) {
+    try {
+      Method method = type.getMethod(name);
+      return method.getParameterTypes().length == 0 ? method : null;
+    } catch (NoSuchMethodException e) {
+      return null;
+    }
+  }
+}

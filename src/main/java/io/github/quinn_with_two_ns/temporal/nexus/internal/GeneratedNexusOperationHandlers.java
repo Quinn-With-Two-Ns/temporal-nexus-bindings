@@ -1,4 +1,4 @@
-package io.github.quinnklassen.temporal.nexusannotations.internal;
+package io.github.quinn_with_two_ns.temporal.nexus.internal;
 
 import io.nexusrpc.OperationDefinition;
 import io.nexusrpc.ServiceDefinition;
@@ -10,8 +10,10 @@ import io.temporal.common.Experimental;
 import io.temporal.nexus.Nexus;
 import io.temporal.nexus.TemporalOperationHandler;
 import io.temporal.nexus.TemporalOperationResult;
+import io.temporal.nexus.TemporalOperationStartContext;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import org.jspecify.annotations.Nullable;
 
 /** Runtime handler factories called by annotation-processor-generated Nexus service bindings. */
 @Experimental
@@ -23,10 +25,11 @@ public final class GeneratedNexusOperationHandlers {
       String operation,
       String workflowType,
       String workflowId,
+      String taskQueue,
       String[] arguments,
       Class<?>[] parameterTypes) {
     Binding<I, R> binding =
-        new Binding<>(service, operation, workflowId, arguments, parameterTypes);
+        new Binding<>(service, operation, workflowId, taskQueue, arguments, parameterTypes);
     return TemporalOperationHandler.create(
         (context, client, input) ->
             client.startWorkflow(
@@ -34,10 +37,12 @@ public final class GeneratedNexusOperationHandlers {
                 binding.outputClass(),
                 binding.outputType(),
                 WorkflowOptions.newBuilder()
-                    .setWorkflowId(binding.id(input, "workflowId"))
-                    .setTaskQueue(Nexus.getOperationContext().getInfo().getTaskQueue())
+                    .setWorkflowId(binding.id(context, input, "workflowId"))
+                    .setTaskQueue(
+                        binding.taskQueue(
+                            context, input, Nexus.getOperationContext().getInfo().getTaskQueue()))
                     .build(),
-                binding.arguments(input)));
+                binding.arguments(context, input)));
   }
 
   public static <I> OperationHandler<I, Void> signal(
@@ -52,8 +57,10 @@ public final class GeneratedNexusOperationHandlers {
     return TemporalOperationHandler.create(
         (context, client, input) -> {
           WorkflowStub stub =
-              client.getWorkflowClient().newUntypedWorkflowStub(binding.id(input, "workflowId"));
-          stub.signal(signalName, binding.arguments(input));
+              client
+                  .getWorkflowClient()
+                  .newUntypedWorkflowStub(binding.id(context, input, "workflowId"));
+          stub.signal(signalName, binding.arguments(context, input));
           return TemporalOperationResult.sync(null);
         });
   }
@@ -70,10 +77,15 @@ public final class GeneratedNexusOperationHandlers {
     return TemporalOperationHandler.create(
         (context, client, input) -> {
           WorkflowStub stub =
-              client.getWorkflowClient().newUntypedWorkflowStub(binding.id(input, "workflowId"));
+              client
+                  .getWorkflowClient()
+                  .newUntypedWorkflowStub(binding.id(context, input, "workflowId"));
           R result =
               stub.query(
-                  queryName, binding.outputClass(), binding.outputType(), binding.arguments(input));
+                  queryName,
+                  binding.outputClass(),
+                  binding.outputType(),
+                  binding.arguments(context, input));
           return TemporalOperationResult.sync(result);
         });
   }
@@ -81,6 +93,7 @@ public final class GeneratedNexusOperationHandlers {
   private static final class Binding<I, R> {
     private final OperationDefinition definition;
     private final InputExpression id;
+    private final @Nullable InputExpression taskQueue;
     private final InputExpression[] arguments;
     private final Class<?>[] parameterTypes;
     private final boolean directInput;
@@ -91,12 +104,25 @@ public final class GeneratedNexusOperationHandlers {
         String id,
         String[] arguments,
         Class<?>[] parameterTypes) {
-      this.definition = ServiceDefinition.fromClass(service).getOperations().get(operation);
-      if (definition == null) {
+      this(service, operation, id, "", arguments, parameterTypes);
+    }
+
+    private Binding(
+        Class<?> service,
+        String operation,
+        String id,
+        String taskQueue,
+        String[] arguments,
+        Class<?>[] parameterTypes) {
+      @Nullable OperationDefinition operationDefinition =
+          ServiceDefinition.fromClass(service).getOperations().get(operation);
+      if (operationDefinition == null) {
         throw new IllegalArgumentException(
             "Nexus service " + service.getName() + " has no operation named " + operation);
       }
+      this.definition = operationDefinition;
       this.id = InputExpression.compile(id);
+      this.taskQueue = taskQueue.isEmpty() ? null : InputExpression.compile(taskQueue);
       this.parameterTypes = parameterTypes.clone();
       this.directInput = arguments.length == 0 && parameterTypes.length == 1;
       if (!directInput && arguments.length != parameterTypes.length) {
@@ -109,10 +135,28 @@ public final class GeneratedNexusOperationHandlers {
       }
     }
 
-    private String id(I input, String attribute) {
+    private String taskQueue(TemporalOperationStartContext context, I input, String fallback) {
+      if (taskQueue == null) {
+        return fallback;
+      }
+      return requiredString(taskQueue, context, input, "taskQueue");
+    }
+
+    private String id(TemporalOperationStartContext context, I input, String attribute) {
+      return requiredString(id, context, input, attribute);
+    }
+
+    private String requiredString(
+        InputExpression expression,
+        TemporalOperationStartContext context,
+        I input,
+        String attribute) {
       try {
-        String result = (String) id.evaluate(input, String.class);
-        if (result == null || result.isEmpty()) {
+        String result =
+            (String)
+                expression.evaluate(
+                    input, context.getRequestId(), context.getHeaders(), String.class);
+        if (result == null || result.trim().isEmpty()) {
           throw new IllegalArgumentException(attribute + " evaluated to null or empty");
         }
         return result;
@@ -121,14 +165,16 @@ public final class GeneratedNexusOperationHandlers {
       }
     }
 
-    private Object[] arguments(I input) {
+    private Object[] arguments(TemporalOperationStartContext context, I input) {
       try {
         if (directInput) {
           return new Object[] {InputExpression.coerce(input, parameterTypes[0], "#{input}")};
         }
         Object[] result = new Object[arguments.length];
         for (int i = 0; i < arguments.length; i++) {
-          result[i] = arguments[i].evaluate(input, parameterTypes[i]);
+          result[i] =
+              arguments[i].evaluate(
+                  input, context.getRequestId(), context.getHeaders(), parameterTypes[i]);
         }
         return result;
       } catch (IllegalArgumentException e) {

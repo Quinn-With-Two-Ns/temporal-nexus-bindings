@@ -1,0 +1,326 @@
+package io.github.quinn_with_two_ns.temporal.nexus;
+
+import static org.junit.Assert.assertEquals;
+
+import io.nexusrpc.Operation;
+import io.nexusrpc.Service;
+import io.nexusrpc.handler.ServiceImplInstance;
+import io.temporal.client.WorkflowOptions;
+import io.temporal.common.interceptors.WorkerInterceptorBase;
+import io.temporal.common.interceptors.WorkflowInboundCallsInterceptor;
+import io.temporal.common.interceptors.WorkflowInboundCallsInterceptorBase;
+import io.temporal.common.interceptors.WorkflowOutboundCallsInterceptor;
+import io.temporal.common.interceptors.WorkflowOutboundCallsInterceptorBase;
+import io.temporal.testing.TestEnvironmentOptions;
+import io.temporal.testing.TestWorkflowEnvironment;
+import io.temporal.worker.Worker;
+import io.temporal.worker.WorkerFactoryOptions;
+import io.temporal.workflow.NexusOperationHandle;
+import io.temporal.workflow.NexusOperationOptions;
+import io.temporal.workflow.NexusServiceOptions;
+import io.temporal.workflow.QueryMethod;
+import io.temporal.workflow.SignalMethod;
+import io.temporal.workflow.Workflow;
+import io.temporal.workflow.WorkflowInterface;
+import io.temporal.workflow.WorkflowMethod;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.TreeSet;
+import org.jspecify.annotations.Nullable;
+import org.junit.Test;
+
+public class GeneratedBindingsIntegrationTest {
+  private static final String NEXUS_TASK_QUEUE = "generated-nexus-annotations";
+  private static final String WORKFLOW_TASK_QUEUE = "generated-workflow-annotations";
+  private static final String ENDPOINT = "generated-nexus-annotations-endpoint";
+
+  @Test
+  public void generatesCompleteServiceSplitAcrossWorkflowClasses() {
+    Object generatedService = DeploymentServiceNexusBindings.create();
+    ServiceImplInstance service = ServiceImplInstance.fromInstance(generatedService);
+
+    assertEquals("DeploymentService", service.getDefinition().getName());
+    assertEquals(
+        Arrays.asList("cancel", "metadata", "start", "status"),
+        new ArrayList<>(new TreeSet<>(service.getOperationHandlers().keySet())));
+  }
+
+  @Test
+  public void explicitlyRegisteredGeneratedServiceRunsWorkflowSignalAndQueryOperations() {
+    TestEnvironmentOptions environmentOptions =
+        TestEnvironmentOptions.newBuilder()
+            .setWorkerFactoryOptions(
+                WorkerFactoryOptions.newBuilder()
+                    .setWorkerInterceptors(new NexusHeaderWorkerInterceptor())
+                    .build())
+            .build();
+    try (TestWorkflowEnvironment environment =
+        TestWorkflowEnvironment.newInstance(environmentOptions)) {
+      Worker nexusWorker = environment.newWorker(NEXUS_TASK_QUEUE);
+      nexusWorker.registerWorkflowImplementationTypes(CallerWorkflowImpl.class);
+      nexusWorker.registerNexusServiceImplementation(DeploymentServiceNexusBindings.create());
+      Worker workflowWorker = environment.newWorker(WORKFLOW_TASK_QUEUE);
+      workflowWorker.registerWorkflowImplementationTypes(
+          DeploymentWorkflowImpl.class, MetadataWorkflowImpl.class);
+      environment.createNexusEndpoint(ENDPOINT, NEXUS_TASK_QUEUE);
+      environment.start();
+
+      CallerWorkflow caller =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  CallerWorkflow.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId("generated-binding-caller")
+                      .setTaskQueue(NEXUS_TASK_QUEUE)
+                      .build());
+
+      assertEquals(
+          "running:cancelled demo:true",
+          caller.call(new StartDeploymentInput("deployment-7", "demo", WORKFLOW_TASK_QUEUE)));
+    }
+  }
+
+  @Service
+  public interface DeploymentService {
+    @Operation
+    DeploymentResult start(StartDeploymentInput input);
+
+    @Operation
+    void cancel(CancelDeploymentInput input);
+
+    @Operation
+    List<String> status(GetDeploymentStatusInput input);
+
+    @Operation
+    String metadata(String input);
+  }
+
+  @WorkflowInterface
+  public interface DeploymentWorkflow {
+    @WorkflowMethod(name = "DeploymentWorkflow")
+    DeploymentResult run(StartDeploymentInput input);
+
+    @SignalMethod(name = "cancelDeployment")
+    void cancel(String reason);
+
+    @QueryMethod(name = "deploymentStatus")
+    List<String> status();
+  }
+
+  @WorkflowInterface
+  public interface MetadataWorkflow {
+    @WorkflowMethod(name = "MetadataWorkflow")
+    String run(String requestId, String routingKey);
+  }
+
+  @ServiceMapping(DeploymentService.class)
+  public static class DeploymentWorkflowImpl implements DeploymentWorkflow {
+    private boolean cancelled;
+    private @Nullable String reason;
+
+    @Override
+    @WorkflowOperation(name = "start", workflowId = "#{id}", taskQueue = "#{taskQueue}")
+    public DeploymentResult run(StartDeploymentInput input) {
+      Workflow.await(() -> cancelled);
+      return new DeploymentResult(
+          Objects.requireNonNull(input.getId()),
+          "cancelled " + Objects.requireNonNull(input.getName()));
+    }
+
+    @Override
+    @SignalOperation(name = "cancel", workflowId = "#{id}", arguments = "#{reason}")
+    public void cancel(String reason) {
+      this.reason = reason;
+      this.cancelled = true;
+    }
+
+    @Override
+    @QueryOperation(name = "status", workflowId = "#{id}")
+    public List<String> status() {
+      return Collections.singletonList(cancelled ? Objects.requireNonNull(reason) : "running");
+    }
+  }
+
+  @ServiceMapping(DeploymentService.class)
+  public static class MetadataWorkflowImpl implements MetadataWorkflow {
+    @Override
+    @WorkflowOperation(
+        name = "metadata",
+        workflowId = "metadata-#{nexus.requestId}",
+        taskQueue = "#{nexus.headers['x-task-queue']}",
+        arguments = {"#{nexus.requestId}", "#{nexus.headers['x-routing-key']}"})
+    public String run(String requestId, String routingKey) {
+      return Boolean.toString(
+          Workflow.getInfo().getWorkflowId().equals("metadata-" + requestId)
+              && routingKey.equals("generated-route"));
+    }
+  }
+
+  private static final class NexusHeaderWorkerInterceptor extends WorkerInterceptorBase {
+    @Override
+    public WorkflowInboundCallsInterceptor interceptWorkflow(WorkflowInboundCallsInterceptor next) {
+      return new WorkflowInboundCallsInterceptorBase(next) {
+        @Override
+        public void init(WorkflowOutboundCallsInterceptor outboundCalls) {
+          super.init(
+              new WorkflowOutboundCallsInterceptorBase(outboundCalls) {
+                @Override
+                public <R> ExecuteNexusOperationOutput<R> executeNexusOperation(
+                    ExecuteNexusOperationInput<R> input) {
+                  input.getHeaders().put("X-Task-Queue", WORKFLOW_TASK_QUEUE);
+                  input.getHeaders().put("X-Routing-Key", "generated-route");
+                  return super.executeNexusOperation(input);
+                }
+              });
+        }
+      };
+    }
+  }
+
+  @WorkflowInterface
+  public interface CallerWorkflow {
+    @WorkflowMethod
+    String call(StartDeploymentInput input);
+  }
+
+  public static class CallerWorkflowImpl implements CallerWorkflow {
+    @Override
+    public String call(StartDeploymentInput input) {
+      NexusServiceOptions serviceOptions =
+          NexusServiceOptions.newBuilder()
+              .setEndpoint(ENDPOINT)
+              .setOperationOptions(
+                  NexusOperationOptions.newBuilder()
+                      .setScheduleToCloseTimeout(Duration.ofSeconds(10))
+                      .build())
+              .build();
+      DeploymentService service =
+          Workflow.newNexusServiceStub(DeploymentService.class, serviceOptions);
+      NexusOperationHandle<DeploymentResult> start =
+          Workflow.startNexusOperation(service::start, input);
+      start.getExecution().get();
+      String id = Objects.requireNonNull(input.getId());
+      String status = service.status(new GetDeploymentStatusInput(id)).get(0);
+      service.cancel(new CancelDeploymentInput(id, Objects.requireNonNull(input.getName())));
+      String result = Objects.requireNonNull(start.getResult().get().getStatus());
+      return status + ":" + result + ":" + service.metadata("ignored");
+    }
+  }
+
+  public static final class StartDeploymentInput {
+    private @Nullable String id;
+    private @Nullable String name;
+    private @Nullable String taskQueue;
+
+    public StartDeploymentInput() {}
+
+    StartDeploymentInput(String id, String name, String taskQueue) {
+      this.id = id;
+      this.name = name;
+      this.taskQueue = taskQueue;
+    }
+
+    public @Nullable String getId() {
+      return id;
+    }
+
+    public void setId(String id) {
+      this.id = id;
+    }
+
+    public @Nullable String getName() {
+      return name;
+    }
+
+    public void setName(String name) {
+      this.name = name;
+    }
+
+    public @Nullable String getTaskQueue() {
+      return taskQueue;
+    }
+
+    public void setTaskQueue(String taskQueue) {
+      this.taskQueue = taskQueue;
+    }
+  }
+
+  public static final class CancelDeploymentInput {
+    private @Nullable String id;
+    private @Nullable String reason;
+
+    public CancelDeploymentInput() {}
+
+    CancelDeploymentInput(String id, String reason) {
+      this.id = id;
+      this.reason = reason;
+    }
+
+    public @Nullable String getId() {
+      return id;
+    }
+
+    public void setId(String id) {
+      this.id = id;
+    }
+
+    public @Nullable String getReason() {
+      return reason;
+    }
+
+    public void setReason(String reason) {
+      this.reason = reason;
+    }
+  }
+
+  public static final class GetDeploymentStatusInput {
+    private @Nullable String id;
+
+    public GetDeploymentStatusInput() {}
+
+    GetDeploymentStatusInput(String id) {
+      this.id = id;
+    }
+
+    public @Nullable String getId() {
+      return id;
+    }
+
+    public void setId(String id) {
+      this.id = id;
+    }
+  }
+
+  public static final class DeploymentResult {
+    private @Nullable String id;
+    private @Nullable String status;
+
+    public DeploymentResult() {}
+
+    DeploymentResult(String id, String status) {
+      this.id = id;
+      this.status = status;
+    }
+
+    public @Nullable String getId() {
+      return id;
+    }
+
+    public void setId(String id) {
+      this.id = id;
+    }
+
+    public @Nullable String getStatus() {
+      return status;
+    }
+
+    public void setStatus(String status) {
+      this.status = status;
+    }
+  }
+}

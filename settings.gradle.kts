@@ -5,4 +5,4 @@ pluginManagement {
     }
 }
 
-rootProject.name = 'temporal-nexus-annotations'
+rootProject.name = "temporal-nexus-bindings"
