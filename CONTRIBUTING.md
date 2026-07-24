@@ -1,7 +1,11 @@
 # Contributing
 
-Contributions are welcome. Keep changes focused, add regression coverage for behavior changes, and
-preserve Java 8 compatibility for the published library.
+This project is a prototype, and its design and scope are still evolving. Contributions are
+welcome for discussion, but proposed changes—including completed pull requests—may not be
+accepted. Please open an issue before investing significant effort in a contribution.
+
+Keep changes focused, add regression coverage for behavior changes, and preserve Java 8
+compatibility for the published library.
 
 ## Development requirements
 
