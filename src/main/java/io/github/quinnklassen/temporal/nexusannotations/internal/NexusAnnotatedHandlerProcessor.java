@@ -1,0 +1,713 @@
+package io.github.quinnklassen.temporal.nexusannotations.internal;
+
+import java.io.IOException;
+import java.io.Writer;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import javax.annotation.processing.AbstractProcessor;
+import javax.annotation.processing.Filer;
+import javax.annotation.processing.Messager;
+import javax.annotation.processing.RoundEnvironment;
+import javax.lang.model.SourceVersion;
+import javax.lang.model.element.AnnotationMirror;
+import javax.lang.model.element.AnnotationValue;
+import javax.lang.model.element.Element;
+import javax.lang.model.element.ElementKind;
+import javax.lang.model.element.ExecutableElement;
+import javax.lang.model.element.Modifier;
+import javax.lang.model.element.PackageElement;
+import javax.lang.model.element.TypeElement;
+import javax.lang.model.element.VariableElement;
+import javax.lang.model.type.DeclaredType;
+import javax.lang.model.type.ExecutableType;
+import javax.lang.model.type.PrimitiveType;
+import javax.lang.model.type.TypeKind;
+import javax.lang.model.type.TypeMirror;
+import javax.lang.model.util.ElementFilter;
+import javax.lang.model.util.Elements;
+import javax.lang.model.util.Types;
+import javax.tools.Diagnostic;
+import javax.tools.JavaFileObject;
+
+/** Generates complete Nexus service implementations from annotated Temporal handler methods. */
+public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
+  private static final String PACKAGE = "io.github.quinnklassen.temporal.nexusannotations.";
+  private static final String WORKFLOW = PACKAGE + "NexusWorkflowOperation";
+  private static final String SIGNAL = PACKAGE + "NexusSignalWorkflowOperation";
+  private static final String QUERY = PACKAGE + "NexusQueryWorkflowOperation";
+  private static final String UPDATE = PACKAGE + "NexusUpdateWorkflowOperation";
+  private static final String ACTIVITY = PACKAGE + "NexusActivityOperation";
+
+  private static final String NEXUS_SERVICE = "io.nexusrpc.Service";
+  private static final String NEXUS_OPERATION = "io.nexusrpc.Operation";
+  private static final String WORKFLOW_METHOD = "io.temporal.workflow.WorkflowMethod";
+  private static final String SIGNAL_METHOD = "io.temporal.workflow.SignalMethod";
+  private static final String QUERY_METHOD = "io.temporal.workflow.QueryMethod";
+
+  private Elements elements;
+  private Types types;
+  private Filer filer;
+  private Messager messager;
+  private boolean generated;
+
+  @Override
+  public synchronized void init(javax.annotation.processing.ProcessingEnvironment environment) {
+    super.init(environment);
+    this.elements = environment.getElementUtils();
+    this.types = environment.getTypeUtils();
+    this.filer = environment.getFiler();
+    this.messager = environment.getMessager();
+  }
+
+  @Override
+  public Set<String> getSupportedAnnotationTypes() {
+    return new HashSet<>(Arrays.asList(WORKFLOW, SIGNAL, QUERY, UPDATE, ACTIVITY));
+  }
+
+  @Override
+  public SourceVersion getSupportedSourceVersion() {
+    return SourceVersion.RELEASE_8;
+  }
+
+  @Override
+  public boolean process(
+      Set<? extends TypeElement> annotations, RoundEnvironment roundEnvironment) {
+    if (generated || roundEnvironment.processingOver() || annotations.isEmpty()) {
+      return false;
+    }
+    Map<String, ServiceModel> services = new LinkedHashMap<>();
+    boolean valid = true;
+    for (String annotationName : getSupportedAnnotationTypes()) {
+      TypeElement annotation = elements.getTypeElement(annotationName);
+      if (annotation == null) {
+        continue;
+      }
+      for (Element element : roundEnvironment.getElementsAnnotatedWith(annotation)) {
+        if (element.getKind() != ElementKind.METHOD) {
+          error(element, "Nexus operation annotations are only supported on methods");
+          valid = false;
+          continue;
+        }
+        MappingModel mapping = readMapping((ExecutableElement) element, annotationName, services);
+        valid &= mapping != null;
+      }
+    }
+    if (!valid) {
+      generated = true;
+      return true;
+    }
+    for (ServiceModel service : services.values()) {
+      valid &= validateCompleteService(service);
+    }
+    if (valid) {
+      for (ServiceModel service : services.values()) {
+        try {
+          generateService(service);
+        } catch (IOException e) {
+          error(service.service, "Failed generating Nexus binding: " + e.getMessage());
+          valid = false;
+        }
+      }
+    }
+    generated = true;
+    return true;
+  }
+
+  private MappingModel readMapping(
+      ExecutableElement method, String annotationName, Map<String, ServiceModel> services) {
+    HandlerKind kind = handlerKind(annotationName);
+    if (kind == HandlerKind.UPDATE) {
+      error(
+          method,
+          "Nexus update operations require asynchronous update support; TODO for the real implementation");
+      return null;
+    }
+    if (kind == HandlerKind.ACTIVITY) {
+      error(
+          method,
+          "Nexus activity operations require SDK support newer than Temporal Java SDK 1.37.0;"
+              + " TODO for the real implementation");
+      return null;
+    }
+    if (!method.getModifiers().contains(Modifier.PUBLIC)) {
+      error(method, "Annotated Temporal handler methods must be public");
+      return null;
+    }
+    TypeElement owner = (TypeElement) method.getEnclosingElement();
+    TemporalMethod temporalMethod = findTemporalMethod(owner, method);
+    if (temporalMethod == null) {
+      error(method, "Nexus annotation is not on a discoverable Temporal handler method");
+      return null;
+    }
+    if (temporalMethod.kind != kind) {
+      error(
+          method,
+          "Nexus annotation kind "
+              + kind
+              + " does not match Temporal handler kind "
+              + temporalMethod.kind);
+      return null;
+    }
+
+    AnnotationMirror annotation = annotation(method, annotationName);
+    TypeMirror serviceType = typeValue(annotation, "service");
+    if (serviceType == null || serviceType.getKind() != TypeKind.DECLARED) {
+      error(method, "A typed Nexus service is required");
+      return null;
+    }
+    TypeElement serviceElement = (TypeElement) ((DeclaredType) serviceType).asElement();
+    if (annotation(serviceElement, NEXUS_SERVICE) == null) {
+      error(method, serviceElement.getQualifiedName() + " is not annotated with @Service");
+      return null;
+    }
+    ServiceModel service = services.get(serviceElement.getQualifiedName().toString());
+    if (service == null) {
+      service = readService(serviceElement);
+      if (service == null) {
+        return null;
+      }
+      services.put(serviceElement.getQualifiedName().toString(), service);
+    }
+
+    String operationName = stringValue(annotation, "name");
+    OperationModel operation = service.operations.get(operationName);
+    if (operation == null) {
+      error(
+          method,
+          "Nexus service "
+              + serviceElement.getQualifiedName()
+              + " has no operation named "
+              + operationName);
+      return null;
+    }
+    if (service.mappings.containsKey(operationName)) {
+      error(
+          method,
+          "Duplicate mapping for "
+              + serviceElement.getQualifiedName()
+              + "."
+              + operationName
+              + "; also mapped by "
+              + service.mappings.get(operationName).source);
+      return null;
+    }
+
+    String idExpression = stringValue(annotation, "workflowId");
+    if (!validExpression(method, "workflowId", idExpression)) {
+      return null;
+    }
+    List<String> argumentExpressions = stringArrayValue(annotation, "arguments");
+    List<? extends VariableElement> parameters = method.getParameters();
+    boolean directInput = argumentExpressions.isEmpty() && parameters.size() == 1;
+    if (!directInput && argumentExpressions.size() != parameters.size()) {
+      error(
+          method,
+          "Argument expression count "
+              + argumentExpressions.size()
+              + " does not match Temporal parameter count "
+              + parameters.size());
+      return null;
+    }
+    for (int i = 0; i < argumentExpressions.size(); i++) {
+      if (!validExpression(method, "arguments[" + i + "]", argumentExpressions.get(i))) {
+        return null;
+      }
+    }
+    if (directInput && !assignable(operation.inputType, boxed(parameters.get(0).asType()))) {
+      error(
+          method,
+          "Nexus input "
+              + operation.inputType
+              + " is not assignable to Temporal argument "
+              + parameters.get(0).asType());
+      return null;
+    }
+    if (!types.isSameType(boxed(method.getReturnType()), operation.outputType)) {
+      error(
+          method,
+          "Temporal output "
+              + method.getReturnType()
+              + " does not match Nexus output "
+              + operation.outputType);
+      return null;
+    }
+    if (kind == HandlerKind.SIGNAL && operation.outputType.getKind() != TypeKind.VOID) {
+      error(method, "Signal Nexus operation output must be void");
+      return null;
+    }
+
+    List<String> parameterClasses = new ArrayList<>();
+    for (VariableElement parameter : parameters) {
+      parameterClasses.add(classLiteral(parameter.asType()));
+    }
+    MappingModel mapping =
+        new MappingModel(
+            kind,
+            method,
+            operation,
+            temporalMethod.temporalName,
+            idExpression,
+            argumentExpressions,
+            parameterClasses);
+    service.mappings.put(operationName, mapping);
+    return mapping;
+  }
+
+  private ServiceModel readService(TypeElement service) {
+    Map<String, OperationModel> operations = new LinkedHashMap<>();
+    Set<String> methodNames = new HashSet<>();
+    for (ExecutableElement method : ElementFilter.methodsIn(elements.getAllMembers(service))) {
+      if (method.getEnclosingElement().toString().equals(Object.class.getName())) {
+        continue;
+      }
+      AnnotationMirror operationAnnotation = annotation(method, NEXUS_OPERATION);
+      if (operationAnnotation == null) {
+        continue;
+      }
+      String operationName = stringValue(operationAnnotation, "name");
+      if (operationName.isEmpty()) {
+        operationName = method.getSimpleName().toString();
+      }
+      if (operations.containsKey(operationName)) {
+        error(method, "Duplicate Nexus operation name " + operationName);
+        return null;
+      }
+      if (!methodNames.add(method.getSimpleName().toString())) {
+        error(method, "Overloaded Nexus service methods cannot generate @OperationImpl methods");
+        return null;
+      }
+      if (method.getParameters().size() > 1) {
+        error(method, "Nexus operations may have at most one input parameter");
+        return null;
+      }
+      TypeMirror input =
+          method.getParameters().isEmpty()
+              ? types.getNoType(TypeKind.VOID)
+              : boxed(method.getParameters().get(0).asType());
+      TypeMirror output = boxed(method.getReturnType());
+      operations.put(
+          operationName,
+          new OperationModel(operationName, method.getSimpleName().toString(), input, output));
+    }
+    if (operations.isEmpty()) {
+      error(service, "Typed Nexus service has no @Operation methods");
+      return null;
+    }
+    PackageElement servicePackage = elements.getPackageOf(service);
+    return new ServiceModel(
+        service,
+        servicePackage.getQualifiedName().toString(),
+        service.getSimpleName() + "NexusBindings",
+        operations);
+  }
+
+  private boolean validateCompleteService(ServiceModel service) {
+    List<String> missing = new ArrayList<>(service.operations.keySet());
+    missing.removeAll(service.mappings.keySet());
+    if (!missing.isEmpty()) {
+      Collections.sort(missing);
+      error(service.service, "Incomplete Nexus service; missing operations: " + missing);
+      return false;
+    }
+    return true;
+  }
+
+  private void generateService(ServiceModel service) throws IOException {
+    String qualifiedName =
+        service.packageName.isEmpty()
+            ? service.generatedClassName
+            : service.packageName + "." + service.generatedClassName;
+    List<Element> origins = new ArrayList<>();
+    origins.add(service.service);
+    for (MappingModel mapping : service.mappings.values()) {
+      origins.add(mapping.source);
+    }
+    JavaFileObject sourceFile =
+        filer.createSourceFile(qualifiedName, origins.toArray(new Element[0]));
+    try (Writer writer = sourceFile.openWriter()) {
+      if (!service.packageName.isEmpty()) {
+        writer.write("package " + service.packageName + ";\n\n");
+      }
+      writer.write(
+          "@io.nexusrpc.handler.ServiceImpl(service = "
+              + service.service.getQualifiedName()
+              + ".class)\n");
+      writer.write("public final class " + service.generatedClassName + " {\n");
+      writer.write("  private " + service.generatedClassName + "() {}\n\n");
+      writer.write(
+          "  public static Object create() {\n"
+              + "    return new "
+              + service.generatedClassName
+              + "();\n"
+              + "  }\n");
+
+      List<MappingModel> mappings = new ArrayList<>(service.mappings.values());
+      Collections.sort(mappings, Comparator.comparing(mapping -> mapping.operation.methodName));
+      for (MappingModel mapping : mappings) {
+        generateOperation(writer, service, mapping);
+      }
+      writer.write("}\n");
+    }
+  }
+
+  private void generateOperation(Writer writer, ServiceModel service, MappingModel mapping)
+      throws IOException {
+    String inputType = sourceType(mapping.operation.inputType);
+    String outputType = sourceType(mapping.operation.outputType);
+    writer.write("\n  @io.nexusrpc.handler.OperationImpl\n");
+    writer.write(
+        "  public io.nexusrpc.handler.OperationHandler<"
+            + inputType
+            + ", "
+            + outputType
+            + "> "
+            + mapping.operation.methodName
+            + "() {\n");
+    writer.write(
+        "    return io.github.quinnklassen.temporal.nexusannotations.internal.GeneratedNexusOperationHandlers."
+            + factoryMethod(mapping.kind)
+            + "(\n");
+    writer.write("        " + service.service.getQualifiedName() + ".class,\n");
+    writer.write("        " + quote(mapping.operation.name) + ",\n");
+    writer.write("        " + quote(mapping.temporalName) + ",\n");
+    writer.write("        " + quote(mapping.idExpression) + ",\n");
+    writer.write("        " + stringArray(mapping.argumentExpressions) + ",\n");
+    writer.write("        " + classArray(mapping.parameterClasses));
+    writer.write(");\n");
+    writer.write("  }\n");
+  }
+
+  private TemporalMethod findTemporalMethod(TypeElement owner, ExecutableElement method) {
+    Set<String> visited = new HashSet<>();
+    TypeElement current = owner;
+    while (current != null) {
+      for (TypeMirror implementedType : current.getInterfaces()) {
+        TemporalMethod temporalMethod =
+            findTemporalMethod((DeclaredType) implementedType, method, visited);
+        if (temporalMethod != null) {
+          return temporalMethod;
+        }
+      }
+      TypeMirror superclass = current.getSuperclass();
+      if (superclass.getKind() != TypeKind.DECLARED) {
+        break;
+      }
+      TypeElement superclassElement = (TypeElement) ((DeclaredType) superclass).asElement();
+      if (superclassElement.getQualifiedName().contentEquals(Object.class.getName())) {
+        break;
+      }
+      current = superclassElement;
+    }
+    return null;
+  }
+
+  private TemporalMethod findTemporalMethod(
+      DeclaredType interfaceType, ExecutableElement method, Set<String> visited) {
+    TypeElement interfaceElement = (TypeElement) interfaceType.asElement();
+    if (!visited.add(interfaceType.toString())) {
+      return null;
+    }
+    for (ExecutableElement candidate :
+        ElementFilter.methodsIn(interfaceElement.getEnclosedElements())) {
+      if (!sameSignature(method, candidate, interfaceType)) {
+        continue;
+      }
+      TemporalMethod temporalMethod = temporalMethod(candidate);
+      if (temporalMethod != null) {
+        return temporalMethod;
+      }
+    }
+    for (TypeMirror parent : types.directSupertypes(interfaceType)) {
+      if (parent.getKind() != TypeKind.DECLARED) {
+        continue;
+      }
+      TemporalMethod temporalMethod = findTemporalMethod((DeclaredType) parent, method, visited);
+      if (temporalMethod != null) {
+        return temporalMethod;
+      }
+    }
+    return null;
+  }
+
+  private TemporalMethod temporalMethod(ExecutableElement candidate) {
+    AnnotationMirror workflow = annotation(candidate, WORKFLOW_METHOD);
+    if (workflow != null) {
+      String name = stringValue(workflow, "name");
+      if (name.isEmpty()) {
+        name = candidate.getEnclosingElement().getSimpleName().toString();
+      }
+      return new TemporalMethod(HandlerKind.WORKFLOW, name);
+    }
+    AnnotationMirror signal = annotation(candidate, SIGNAL_METHOD);
+    if (signal != null) {
+      return new TemporalMethod(HandlerKind.SIGNAL, defaultMethodName(signal, candidate));
+    }
+    AnnotationMirror query = annotation(candidate, QUERY_METHOD);
+    if (query != null) {
+      return new TemporalMethod(HandlerKind.QUERY, defaultMethodName(query, candidate));
+    }
+    return null;
+  }
+
+  private boolean sameSignature(
+      ExecutableElement implementation,
+      ExecutableElement declaration,
+      DeclaredType declaringInterface) {
+    if (!implementation.getSimpleName().contentEquals(declaration.getSimpleName())) {
+      return false;
+    }
+    List<? extends VariableElement> implementationParameters = implementation.getParameters();
+    List<? extends TypeMirror> declarationParameters =
+        ((ExecutableType) types.asMemberOf(declaringInterface, declaration)).getParameterTypes();
+    if (implementationParameters.size() != declarationParameters.size()) {
+      return false;
+    }
+    for (int i = 0; i < implementationParameters.size(); i++) {
+      if (!types.isSameType(
+          types.erasure(implementationParameters.get(i).asType()),
+          types.erasure(declarationParameters.get(i)))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private String defaultMethodName(AnnotationMirror annotation, ExecutableElement method) {
+    String name = stringValue(annotation, "name");
+    return name.isEmpty() ? method.getSimpleName().toString() : name;
+  }
+
+  private boolean validExpression(Element element, String attribute, String source) {
+    if (source == null || source.trim().isEmpty()) {
+      error(element, attribute + " expression is required");
+      return false;
+    }
+    try {
+      InputExpression.compile(source);
+      return true;
+    } catch (IllegalArgumentException e) {
+      error(element, "Invalid " + attribute + " expression: " + e.getMessage());
+      return false;
+    }
+  }
+
+  private AnnotationMirror annotation(Element element, String qualifiedName) {
+    for (AnnotationMirror annotation : element.getAnnotationMirrors()) {
+      if (annotation.getAnnotationType().toString().equals(qualifiedName)) {
+        return annotation;
+      }
+    }
+    return null;
+  }
+
+  private Map<String, AnnotationValue> values(AnnotationMirror annotation) {
+    Map<String, AnnotationValue> result = new HashMap<>();
+    if (annotation == null) {
+      return result;
+    }
+    for (Map.Entry<? extends ExecutableElement, ? extends AnnotationValue> entry :
+        elements.getElementValuesWithDefaults(annotation).entrySet()) {
+      result.put(entry.getKey().getSimpleName().toString(), entry.getValue());
+    }
+    return result;
+  }
+
+  private String stringValue(AnnotationMirror annotation, String name) {
+    AnnotationValue value = values(annotation).get(name);
+    return value == null ? "" : (String) value.getValue();
+  }
+
+  private TypeMirror typeValue(AnnotationMirror annotation, String name) {
+    AnnotationValue value = values(annotation).get(name);
+    return value == null ? null : (TypeMirror) value.getValue();
+  }
+
+  @SuppressWarnings("unchecked")
+  private List<String> stringArrayValue(AnnotationMirror annotation, String name) {
+    AnnotationValue value = values(annotation).get(name);
+    if (value == null) {
+      return Collections.emptyList();
+    }
+    List<? extends AnnotationValue> array = (List<? extends AnnotationValue>) value.getValue();
+    List<String> result = new ArrayList<>();
+    for (AnnotationValue item : array) {
+      result.add((String) item.getValue());
+    }
+    return result;
+  }
+
+  private TypeMirror boxed(TypeMirror type) {
+    if (type.getKind() == TypeKind.VOID) {
+      return type;
+    }
+    if (type.getKind().isPrimitive()) {
+      return types.boxedClass((PrimitiveType) type).asType();
+    }
+    return type;
+  }
+
+  private boolean assignable(TypeMirror from, TypeMirror to) {
+    return types.isAssignable(from, to) || (isNumber(from) && isNumber(to));
+  }
+
+  private boolean isNumber(TypeMirror type) {
+    TypeElement number = elements.getTypeElement(Number.class.getName());
+    return number != null && types.isAssignable(type, number.asType());
+  }
+
+  private String sourceType(TypeMirror type) {
+    if (type.getKind() == TypeKind.VOID) {
+      return Void.class.getCanonicalName();
+    }
+    return type.toString();
+  }
+
+  private String classLiteral(TypeMirror type) {
+    TypeMirror boxed = boxed(type);
+    if (boxed.getKind() == TypeKind.ARRAY) {
+      return boxed.toString() + ".class";
+    }
+    return types.erasure(boxed).toString() + ".class";
+  }
+
+  private String factoryMethod(HandlerKind kind) {
+    switch (kind) {
+      case WORKFLOW:
+        return "workflow";
+      case SIGNAL:
+        return "signal";
+      case QUERY:
+        return "query";
+      default:
+        throw new IllegalArgumentException("Unsupported handler kind " + kind);
+    }
+  }
+
+  private HandlerKind handlerKind(String annotationName) {
+    if (WORKFLOW.equals(annotationName)) return HandlerKind.WORKFLOW;
+    if (SIGNAL.equals(annotationName)) return HandlerKind.SIGNAL;
+    if (QUERY.equals(annotationName)) return HandlerKind.QUERY;
+    if (UPDATE.equals(annotationName)) return HandlerKind.UPDATE;
+    if (ACTIVITY.equals(annotationName)) return HandlerKind.ACTIVITY;
+    throw new IllegalArgumentException("Unknown annotation " + annotationName);
+  }
+
+  private String stringArray(List<String> values) {
+    StringBuilder result = new StringBuilder("new String[] {");
+    for (int i = 0; i < values.size(); i++) {
+      if (i > 0) result.append(", ");
+      result.append(quote(values.get(i)));
+    }
+    return result.append('}').toString();
+  }
+
+  private String classArray(List<String> values) {
+    StringBuilder result = new StringBuilder("new Class<?>[] {");
+    for (int i = 0; i < values.size(); i++) {
+      if (i > 0) result.append(", ");
+      result.append(values.get(i));
+    }
+    return result.append('}').toString();
+  }
+
+  private String quote(String value) {
+    return "\""
+        + value
+            .replace("\\", "\\\\")
+            .replace("\"", "\\\"")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+        + "\"";
+  }
+
+  private void error(Element element, String message) {
+    messager.printMessage(Diagnostic.Kind.ERROR, message, element);
+  }
+
+  private enum HandlerKind {
+    WORKFLOW,
+    SIGNAL,
+    QUERY,
+    UPDATE,
+    ACTIVITY
+  }
+
+  private static final class TemporalMethod {
+    private final HandlerKind kind;
+    private final String temporalName;
+
+    private TemporalMethod(HandlerKind kind, String temporalName) {
+      this.kind = kind;
+      this.temporalName = temporalName;
+    }
+  }
+
+  private static final class OperationModel {
+    private final String name;
+    private final String methodName;
+    private final TypeMirror inputType;
+    private final TypeMirror outputType;
+
+    private OperationModel(
+        String name, String methodName, TypeMirror inputType, TypeMirror outputType) {
+      this.name = name;
+      this.methodName = methodName;
+      this.inputType = inputType;
+      this.outputType = outputType;
+    }
+  }
+
+  private static final class MappingModel {
+    private final HandlerKind kind;
+    private final ExecutableElement source;
+    private final OperationModel operation;
+    private final String temporalName;
+    private final String idExpression;
+    private final List<String> argumentExpressions;
+    private final List<String> parameterClasses;
+
+    private MappingModel(
+        HandlerKind kind,
+        ExecutableElement source,
+        OperationModel operation,
+        String temporalName,
+        String idExpression,
+        List<String> argumentExpressions,
+        List<String> parameterClasses) {
+      this.kind = kind;
+      this.source = source;
+      this.operation = operation;
+      this.temporalName = temporalName;
+      this.idExpression = idExpression;
+      this.argumentExpressions = argumentExpressions;
+      this.parameterClasses = parameterClasses;
+    }
+  }
+
+  private static final class ServiceModel {
+    private final TypeElement service;
+    private final String packageName;
+    private final String generatedClassName;
+    private final Map<String, OperationModel> operations;
+    private final Map<String, MappingModel> mappings = new LinkedHashMap<>();
+
+    private ServiceModel(
+        TypeElement service,
+        String packageName,
+        String generatedClassName,
+        Map<String, OperationModel> operations) {
+      this.service = service;
+      this.packageName = packageName;
+      this.generatedClassName = generatedClassName;
+      this.operations = operations;
+    }
+  }
+}
