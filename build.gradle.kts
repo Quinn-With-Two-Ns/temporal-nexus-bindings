@@ -83,6 +83,7 @@ publishing {
                     license {
                         name = "The Apache License, Version 2.0"
                         url = "https://www.apache.org/licenses/LICENSE-2.0.txt"
+                        distribution = "repo"
                     }
                 }
 
@@ -103,9 +104,17 @@ publishing {
             }
         }
     }
+
+    repositories {
+        maven {
+            name = "centralBundle"
+            url = layout.buildDirectory.dir("central-bundle").get().asFile.toURI()
+        }
+    }
 }
 
 val signingKey = providers.environmentVariable("SIGNING_KEY")
+val releaseVersion = providers.gradleProperty("version")
 if (signingKey.isPresent) {
     signing {
         useInMemoryPgpKeys(
@@ -113,5 +122,19 @@ if (signingKey.isPresent) {
             providers.environmentVariable("SIGNING_PASSWORD").getOrElse(""),
         )
         sign(publishing.publications["mavenJava"])
+    }
+}
+
+tasks.named("publishMavenJavaPublicationToCentralBundleRepository") {
+    doFirst {
+        check(releaseVersion.orNull?.isNotBlank() == true) {
+            "Pass the release version explicitly with -Pversion=<version>."
+        }
+        check(!version.toString().endsWith("-SNAPSHOT")) {
+            "Maven Central releases cannot use a -SNAPSHOT version."
+        }
+        check(signingKey.orNull?.isNotBlank() == true) {
+            "SIGNING_KEY is required to create a Maven Central release bundle."
+        }
     }
 }

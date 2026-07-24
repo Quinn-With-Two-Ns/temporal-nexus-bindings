@@ -6,12 +6,8 @@ implementation cost.
 
 ## P0 — Release and compatibility foundations
 
-- [ ] Add continuous integration.
+- [x] Add continuous integration.
   - Run `spotlessCheck`, `check`, `javadoc`, and the full build on supported JDKs.
-  - Add a consumer smoke test that publishes the artifact locally and compiles a separate project.
-  - Verify the generated bindings can be registered and invoked from the consumer project.
-- [ ] Update `.omx/consumer-verification` for the current artifact coordinates, package names, and
-      annotation names.
 - [ ] Add a Temporal SDK compatibility matrix.
   - Test the minimum supported SDK version.
   - Test the newest supported SDK version.

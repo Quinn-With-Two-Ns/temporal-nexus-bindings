@@ -1,0 +1,294 @@
+name: Publish to Maven Central
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version to publish (for example, 0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: maven-central-publish
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify release
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      commit: ${{ steps.release.outputs.commit }}
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+
+    steps:
+      - name: Check out main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Validate release version
+        id: release
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "::error::Run the publishing workflow from the main branch."
+            exit 1
+          fi
+
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::Release version must look like 0.1.0 or 1.2.3-rc.1."
+            exit 1
+          fi
+
+          release_commit="$(git rev-parse HEAD)"
+          if [[ "$release_commit" != "$GITHUB_SHA" ]]; then
+            echo "::error::The checked-out commit does not match the workflow commit."
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$release_commit" origin/main; then
+            echo "::error::The release commit must be contained in main."
+            exit 1
+          fi
+
+          {
+            echo "commit=$release_commit"
+            echo "tag=v$RELEASE_VERSION"
+            echo "version=$RELEASE_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+
+      - name: Set up Java
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+
+      - name: Run release verification
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: >
+          ./gradlew --no-daemon clean spotlessCheck check javadoc
+          -Pversion="$VERSION"
+
+  tag:
+    name: Create release tag
+    needs: verify
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out verified release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.verify.outputs.commit }}
+
+      - name: Create and push release tag
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ needs.verify.outputs.tag }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+            if [[ "$(git rev-list -n 1 "$RELEASE_TAG")" != "$(git rev-parse HEAD)" ]]; then
+              echo "::error::Release tag $RELEASE_TAG already points to another commit."
+              exit 1
+            fi
+            echo "Release tag $RELEASE_TAG already points to the verified commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "$RELEASE_TAG" --message "Release $VERSION"
+          git push origin "refs/tags/$RELEASE_TAG"
+
+  publish:
+    name: Publish release
+    needs:
+      - verify
+      - tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: maven-central
+      url: https://central.sonatype.com/publishing/deployments
+
+    steps:
+      - name: Check out verified release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ needs.verify.outputs.commit }}
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+
+      - name: Set up Java
+        uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+        with:
+          cache-read-only: true
+
+      - name: Build signed Maven Central bundle
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: >
+          ./gradlew --no-daemon clean
+          publishMavenJavaPublicationToCentralBundleRepository
+          -Pversion="$VERSION"
+
+      - name: Validate Maven Central bundle
+        shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          artifact="temporal-nexus-bindings-$VERSION"
+          release_dir="build/central-bundle/io/github/quinn-with-two-ns/temporal-nexus-bindings/$VERSION"
+          required_artifacts=(
+            "$release_dir/$artifact.jar"
+            "$release_dir/$artifact-sources.jar"
+            "$release_dir/$artifact-javadoc.jar"
+            "$release_dir/$artifact.pom"
+          )
+
+          for file in "${required_artifacts[@]}"; do
+            for suffix in "" ".asc" ".md5" ".sha1"; do
+              if [[ ! -s "$file$suffix" ]]; then
+                echo "::error::Maven Central bundle is missing $file$suffix."
+                exit 1
+              fi
+            done
+          done
+
+          (
+            cd build/central-bundle
+            zip -q -r ../central-bundle.zip .
+          )
+          test -s build/central-bundle.zip
+
+      - name: Upload and publish through the Central Portal API
+        shell: bash
+        env:
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          : "${CENTRAL_USERNAME:?CENTRAL_USERNAME must be configured in the maven-central environment}"
+          : "${CENTRAL_PASSWORD:?CENTRAL_PASSWORD must be configured in the maven-central environment}"
+
+          authorization="$(
+            printf '%s:%s' "$CENTRAL_USERNAME" "$CENTRAL_PASSWORD" | base64 | tr -d '\n'
+          )"
+          echo "::add-mask::$authorization"
+
+          response_file="$(mktemp)"
+          trap 'rm -f "$response_file"' EXIT
+          deployment_name="temporal-nexus-bindings-$VERSION"
+          upload_url="https://central.sonatype.com/api/v1/publisher/upload"
+          status_code="$(
+            curl \
+              --silent \
+              --show-error \
+              --connect-timeout 15 \
+              --max-time 180 \
+              --output "$response_file" \
+              --write-out '%{http_code}' \
+              --request POST \
+              --header "Authorization: Bearer $authorization" \
+              --form "bundle=@build/central-bundle.zip;type=application/octet-stream" \
+              "$upload_url?name=$deployment_name&publishingType=AUTOMATIC"
+          )"
+
+          if [[ "$status_code" != "201" ]]; then
+            echo "::error::Maven Central rejected the bundle with HTTP $status_code."
+            cat "$response_file"
+            exit 1
+          fi
+
+          deployment_id="$(tr -d '\r\n' < "$response_file")"
+          if [[ ! "$deployment_id" =~ ^[0-9a-fA-F-]{36}$ ]]; then
+            echo "::error::Maven Central returned an invalid deployment ID."
+            exit 1
+          fi
+
+          echo "Maven Central deployment: $deployment_id"
+          {
+            echo "### Maven Central publication"
+            echo
+            echo "- Version: \`$VERSION\`"
+            echo "- Deployment: \`$deployment_id\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          status_url="https://central.sonatype.com/api/v1/publisher/status?id=$deployment_id"
+          for attempt in {1..90}; do
+            status_json="$(
+              curl \
+                --fail-with-body \
+                --silent \
+                --show-error \
+                --retry 3 \
+                --retry-all-errors \
+                --connect-timeout 15 \
+                --max-time 60 \
+                --request POST \
+                --header "Authorization: Bearer $authorization" \
+                "$status_url"
+            )"
+            deployment_state="$(jq -er '.deploymentState' <<<"$status_json")"
+            echo "Maven Central state: $deployment_state (attempt $attempt/90)"
+
+            case "$deployment_state" in
+              PUBLISHED)
+                echo "- Result: published" >> "$GITHUB_STEP_SUMMARY"
+                exit 0
+                ;;
+              FAILED)
+                echo "::error::Maven Central validation or publication failed."
+                jq -c '.errors // []' <<<"$status_json"
+                exit 1
+                ;;
+              PENDING | VALIDATING | VALIDATED | PUBLISHING)
+                sleep 10
+                ;;
+              *)
+                echo "::error::Unexpected Maven Central deployment state: $deployment_state"
+                exit 1
+                ;;
+            esac
+          done
+
+          echo "::error::Timed out waiting for Maven Central publication."
+          exit 1
