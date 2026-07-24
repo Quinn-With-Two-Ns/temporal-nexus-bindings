@@ -22,6 +22,10 @@ jobs:
     timeout-minutes: 30
     outputs:
       commit: ${{ steps.release.outputs.commit }}
+      jar_sha256: ${{ steps.artifacts.outputs.jar_sha256 }}
+      javadoc_sha256: ${{ steps.artifacts.outputs.javadoc_sha256 }}
+      pom_sha256: ${{ steps.artifacts.outputs.pom_sha256 }}
+      sources_sha256: ${{ steps.artifacts.outputs.sources_sha256 }}
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
 
@@ -84,8 +88,25 @@ jobs:
         env:
           VERSION: ${{ steps.release.outputs.version }}
         run: >
-          ./gradlew --no-daemon clean spotlessCheck check javadoc
+          ./gradlew --no-daemon clean spotlessCheck check
+          jar sourcesJar javadocJar generatePomFileForMavenJavaPublication
           -Pversion="$VERSION"
+
+      - name: Record verified artifact digests
+        id: artifacts
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          artifact="build/libs/temporal-nexus-bindings-$VERSION"
+          {
+            echo "jar_sha256=$(sha256sum "$artifact.jar" | cut -d ' ' -f 1)"
+            echo "sources_sha256=$(sha256sum "$artifact-sources.jar" | cut -d ' ' -f 1)"
+            echo "javadoc_sha256=$(sha256sum "$artifact-javadoc.jar" | cut -d ' ' -f 1)"
+            echo "pom_sha256=$(sha256sum build/publications/mavenJava/pom-default.xml | cut -d ' ' -f 1)"
+          } >> "$GITHUB_OUTPUT"
 
   tag:
     name: Create release tag
@@ -169,6 +190,10 @@ jobs:
       - name: Validate Maven Central bundle
         shell: bash
         env:
+          EXPECTED_JAR_SHA256: ${{ needs.verify.outputs.jar_sha256 }}
+          EXPECTED_JAVADOC_SHA256: ${{ needs.verify.outputs.javadoc_sha256 }}
+          EXPECTED_POM_SHA256: ${{ needs.verify.outputs.pom_sha256 }}
+          EXPECTED_SOURCES_SHA256: ${{ needs.verify.outputs.sources_sha256 }}
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
           set -euo pipefail
@@ -181,14 +206,27 @@ jobs:
             "$release_dir/$artifact-javadoc.jar"
             "$release_dir/$artifact.pom"
           )
+          expected_sha256=(
+            "$EXPECTED_JAR_SHA256"
+            "$EXPECTED_SOURCES_SHA256"
+            "$EXPECTED_JAVADOC_SHA256"
+            "$EXPECTED_POM_SHA256"
+          )
 
-          for file in "${required_artifacts[@]}"; do
+          for index in "${!required_artifacts[@]}"; do
+            file="${required_artifacts[$index]}"
             for suffix in "" ".asc" ".md5" ".sha1"; do
               if [[ ! -s "$file$suffix" ]]; then
                 echo "::error::Maven Central bundle is missing $file$suffix."
                 exit 1
               fi
             done
+
+            actual_sha256="$(sha256sum "$file" | cut -d ' ' -f 1)"
+            if [[ "$actual_sha256" != "${expected_sha256[$index]}" ]]; then
+              echo "::error::$file differs from the artifact verified before release approval."
+              exit 1
+            fi
           done
 
           (

@@ -1,5 +1,6 @@
 import net.ltgt.gradle.errorprone.CheckSeverity
 import net.ltgt.gradle.errorprone.errorprone
+import org.gradle.api.tasks.bundling.AbstractArchiveTask
 import org.gradle.api.tasks.compile.JavaCompile
 import org.gradle.external.javadoc.StandardJavadocDocletOptions
 
@@ -59,6 +60,11 @@ tasks.withType<Test>().configureEach {
 tasks.withType<Javadoc>().configureEach {
     options.encoding = "UTF-8"
     (options as StandardJavadocDocletOptions).addStringOption("Xdoclint:reference", "-quiet")
+}
+
+tasks.withType<AbstractArchiveTask>().configureEach {
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
 }
 
 spotless {
