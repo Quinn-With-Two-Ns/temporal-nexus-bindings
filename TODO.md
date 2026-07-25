@@ -42,6 +42,24 @@ implementation cost.
 - [x] Validate literal option values during annotation processing.
 - [x] Add generated-handler tests proving configured values reach the Temporal client.
 
+### Customize workflow cancellation
+
+- [ ] Define a `WorkflowCancellationHandler` extension point for workflow-backed operations.
+- [ ] Provide built-in handlers for:
+  - Leaving the workflow running after acknowledging the cancellation request.
+  - Cancelling the workflow.
+  - Signalling the workflow, with optional cancellation-context-derived arguments.
+  - Terminating the workflow, with a configurable reason and optional details.
+- [ ] Let generated bindings configure a cancellation-handler instance per workflow operation while
+      preserving workflow cancellation as the default for the no-argument `create()` path.
+- [ ] Keep caller-side `NexusOperationCancellationType.ABANDON` distinct from a handler-side no-op:
+      the former sends no cancellation request, while the latter acknowledges a request without
+      changing the underlying workflow.
+- [ ] Require built-in and custom handlers to be thread-safe, return promptly, and document
+      idempotency expectations for cancellation request retries.
+- [ ] Add handler-factory, generated-binding, and end-to-end coverage for every built-in behavior
+      and custom-handler delegation.
+
 ### Implement workflow updates
 
 - [ ] Implement synchronous `@UpdateOperation` using `WorkflowStub.update`.
@@ -90,6 +108,22 @@ implementation cost.
 - [ ] Decide how null-safe traversal should behave and preserve compile-time type validation.
 - [ ] Cache resolved property accessors or generate typed extractors to reduce per-call reflection.
 - [ ] Keep method invocation, class metadata access, and general-purpose SpEL out of scope.
+
+## P2 — Better model-type support
+
+- [ ] Support expression traversal through Java record components.
+  - Spring SpEL reads a property by trying `getX()`, `isX()`, and then a record-style plain
+    zero-argument accessor such as `x()`.
+  - The current bounded expression implementation only supports `getX()`, `isX()`, and public
+    fields at compile time and runtime.
+  - Detect genuine record components explicitly so record support does not accidentally expose
+    every public zero-argument method.
+- [ ] Support Kotlin data classes when processing through KAPT.
+- [ ] Support Protobuf-generated message accessors.
+- [ ] Recognize boolean `isX` and fluent zero-argument accessors such as `customerId()`.
+  - Treat general fluent accessors as a separate design decision from record components because
+    unrestricted method matching would broaden the expression language's security surface.
+- [ ] Add processor and runtime coverage for each supported model style.
 
 ## P2 — Nexus service method overloads
 
