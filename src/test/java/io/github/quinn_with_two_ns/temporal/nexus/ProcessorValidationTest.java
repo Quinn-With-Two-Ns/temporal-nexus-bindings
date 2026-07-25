@@ -206,7 +206,8 @@ public class ProcessorValidationTest {
                     + "    @Override\n"
                     + "    @WorkflowOperation(service = DeploymentService.class,"
                     + " name = \"start\", workflowId = \"deployment-#{nexus.requestId}\","
-                    + " taskQueue = \"#{nexus.headers['x-task-queue']}\","
+                    + " options = @WorkflowStartOptions("
+                    + "taskQueue = \"#{nexus.headers['x-task-queue']}\"),"
                     + " arguments = {\"#{nexus.requestId}\","
                     + " \"#{nexus.headers['x-routing-key']}\","
                     + " \"#{nexus.headers}\", \"#{requestId}\"})\n"
@@ -260,7 +261,7 @@ public class ProcessorValidationTest {
                     + "  static class WorkflowImpl implements DeploymentWorkflow {\n"
                     + "    @Override\n"
                     + "    @WorkflowOperation(name = \"start\", workflowId = \"#{id}\","
-                    + " taskQueue = \"#{taskQueue}\")\n"
+                    + " options = @WorkflowStartOptions(taskQueue = \"#{taskQueue}\"))\n"
                     + "    public String run(DeployInput input) { return input.getId(); }\n"
                     + "  }\n"));
 
@@ -338,12 +339,91 @@ public class ProcessorValidationTest {
                     + "    @Override\n"
                     + "    @WorkflowOperation(service = DeploymentService.class,"
                     + " name = \"start\", workflowId = \"#{id}\","
-                    + " taskQueue = \"#{missing}\")\n"
+                    + " options = @WorkflowStartOptions(taskQueue = \"#{missing}\"))\n"
                     + "    public String run(DeployInput input) { return input.getId(); }\n"
                     + "  }\n"));
 
     assertFailureContains(
-        compilation, "Invalid taskQueue expression: property \"missing\" does not exist");
+        compilation, "Invalid options.taskQueue expression: property \"missing\" does not exist");
+  }
+
+  @Test
+  public void acceptsWorkflowStartOptionExpressions() throws IOException {
+    Compilation compilation =
+        compile(
+            "WorkflowStartOptionExpressions",
+            source(
+                "  static class DeployInput {\n"
+                    + "    public String getId() { return \"id\"; }\n"
+                    + "    public String getTimeout() { return \"PT1H\"; }\n"
+                    + "    public int getAttempts() { return 3; }\n"
+                    + "    public String getPolicy() { return \"REJECT_DUPLICATE\"; }\n"
+                    + "  }\n"
+                    + "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(DeployInput input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(DeployInput input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{id}\","
+                    + " options = @WorkflowStartOptions("
+                    + "executionTimeout = \"#{timeout}\","
+                    + " retryMaximumAttempts = \"#{attempts}\","
+                    + " workflowIdReusePolicy = \"#{policy}\","
+                    + " summary = \"Deployment #{id}\"))\n"
+                    + "    public String run(DeployInput input) { return input.getId(); }\n"
+                    + "  }\n"));
+
+    assertTrue(compilation.messages, compilation.success);
+  }
+
+  @Test
+  public void rejectsInvalidLiteralWorkflowStartOption() throws IOException {
+    Compilation compilation =
+        compile(
+            "InvalidWorkflowStartDuration",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\","
+                    + " options = @WorkflowStartOptions(executionTimeout = \"tomorrow\"))\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation, "Invalid options.executionTimeout must be an ISO-8601 duration");
+  }
+
+  @Test
+  public void rejectsIncompatibleLiteralWorkflowIdPolicies() throws IOException {
+    Compilation compilation =
+        compile(
+            "IncompatibleWorkflowIdPolicies",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\","
+                    + " options = @WorkflowStartOptions("
+                    + "workflowIdReusePolicy = \"TERMINATE_IF_RUNNING\","
+                    + " workflowIdConflictPolicy = \"FAIL\"))\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "workflowIdConflictPolicy cannot be used with workflowIdReusePolicy"
+            + " TERMINATE_IF_RUNNING");
   }
 
   @Test

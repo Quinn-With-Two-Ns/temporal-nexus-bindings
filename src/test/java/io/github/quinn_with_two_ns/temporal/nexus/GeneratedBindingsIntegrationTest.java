@@ -6,6 +6,7 @@ import io.nexusrpc.Operation;
 import io.nexusrpc.Service;
 import io.nexusrpc.handler.ServiceImplInstance;
 import io.temporal.client.WorkflowOptions;
+import io.temporal.common.RetryOptions;
 import io.temporal.common.interceptors.WorkerInterceptorBase;
 import io.temporal.common.interceptors.WorkflowInboundCallsInterceptor;
 import io.temporal.common.interceptors.WorkflowInboundCallsInterceptorBase;
@@ -80,7 +81,7 @@ public class GeneratedBindingsIntegrationTest {
                       .build());
 
       assertEquals(
-          "running:cancelled demo:true",
+          "running:cancelled demo:true:true",
           caller.call(new StartDeploymentInput("deployment-7", "demo", WORKFLOW_TASK_QUEUE)));
     }
   }
@@ -124,12 +125,31 @@ public class GeneratedBindingsIntegrationTest {
     private @Nullable String reason;
 
     @Override
-    @WorkflowOperation(name = "start", workflowId = "#{id}", taskQueue = "#{taskQueue}")
+    @WorkflowOperation(
+        name = "start",
+        workflowId = "#{id}",
+        options =
+            @WorkflowStartOptions(
+                taskQueue = "#{taskQueue}",
+                executionTimeout = "#{executionTimeout}",
+                runTimeout = "PT1H",
+                retryInitialInterval = "PT1S",
+                retryMaximumAttempts = "#{retryMaximumAttempts}"))
     public DeploymentResult run(StartDeploymentInput input) {
+      boolean optionsApplied = startOptionsApplied();
       Workflow.await(() -> cancelled);
       return new DeploymentResult(
           Objects.requireNonNull(input.getId()),
-          "cancelled " + Objects.requireNonNull(input.getName()));
+          "cancelled " + Objects.requireNonNull(input.getName()) + ":" + optionsApplied);
+    }
+
+    private boolean startOptionsApplied() {
+      @Nullable RetryOptions retry = Workflow.getInfo().getRetryOptions();
+      return retry != null
+          && Duration.ofHours(2).equals(Workflow.getInfo().getWorkflowExecutionTimeout())
+          && Duration.ofHours(1).equals(Workflow.getInfo().getWorkflowRunTimeout())
+          && Duration.ofSeconds(1).equals(retry.getInitialInterval())
+          && retry.getMaximumAttempts() == 3;
     }
 
     @Override
@@ -152,7 +172,7 @@ public class GeneratedBindingsIntegrationTest {
     @WorkflowOperation(
         name = "metadata",
         workflowId = "metadata-#{nexus.requestId}",
-        taskQueue = "#{nexus.headers['x-task-queue']}",
+        options = @WorkflowStartOptions(taskQueue = "#{nexus.headers['x-task-queue']}"),
         arguments = {"#{nexus.requestId}", "#{nexus.headers['x-routing-key']}"})
     public String run(String requestId, String routingKey) {
       return Boolean.toString(
@@ -216,6 +236,8 @@ public class GeneratedBindingsIntegrationTest {
     private @Nullable String id;
     private @Nullable String name;
     private @Nullable String taskQueue;
+    private @Nullable String executionTimeout;
+    private int retryMaximumAttempts;
 
     public StartDeploymentInput() {}
 
@@ -223,6 +245,8 @@ public class GeneratedBindingsIntegrationTest {
       this.id = id;
       this.name = name;
       this.taskQueue = taskQueue;
+      this.executionTimeout = "PT2H";
+      this.retryMaximumAttempts = 3;
     }
 
     public @Nullable String getId() {
@@ -247,6 +271,22 @@ public class GeneratedBindingsIntegrationTest {
 
     public void setTaskQueue(String taskQueue) {
       this.taskQueue = taskQueue;
+    }
+
+    public @Nullable String getExecutionTimeout() {
+      return executionTimeout;
+    }
+
+    public void setExecutionTimeout(String executionTimeout) {
+      this.executionTimeout = executionTimeout;
+    }
+
+    public int getRetryMaximumAttempts() {
+      return retryMaximumAttempts;
+    }
+
+    public void setRetryMaximumAttempts(int retryMaximumAttempts) {
+      this.retryMaximumAttempts = retryMaximumAttempts;
     }
   }
 

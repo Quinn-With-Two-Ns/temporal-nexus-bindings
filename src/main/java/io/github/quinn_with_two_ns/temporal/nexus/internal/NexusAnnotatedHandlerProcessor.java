@@ -2,6 +2,7 @@ package io.github.quinn_with_two_ns.temporal.nexus.internal;
 
 import java.io.IOException;
 import java.io.Writer;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -10,6 +11,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -262,16 +264,13 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
         elements.getTypeElement(String.class.getName()).asType())) {
       return null;
     }
-    String taskQueueExpression =
-        kind == HandlerKind.WORKFLOW ? stringValue(annotation, "taskQueue") : "";
-    if (!taskQueueExpression.isEmpty()
-        && !validExpression(
-            method,
-            "taskQueue",
-            taskQueueExpression,
-            operation.inputType,
-            elements.getTypeElement(String.class.getName()).asType())) {
-      return null;
+    WorkflowStartOptionsModel startOptions = WorkflowStartOptionsModel.EMPTY;
+    if (kind == HandlerKind.WORKFLOW) {
+      @Nullable AnnotationMirror options = annotationValue(annotation, "options");
+      startOptions = readWorkflowStartOptions(method, options, operation.inputType);
+      if (startOptions == null) {
+        return null;
+      }
     }
     List<String> argumentExpressions = stringArrayValue(annotation, "arguments");
     List<? extends VariableElement> parameters = method.getParameters();
@@ -329,11 +328,187 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
             operation,
             temporalMethod.temporalName,
             idExpression,
-            taskQueueExpression,
+            startOptions,
             argumentExpressions,
             parameterClasses);
     service.mappings.put(operationName, mapping);
     return mapping;
+  }
+
+  private @Nullable WorkflowStartOptionsModel readWorkflowStartOptions(
+      Element method, @Nullable AnnotationMirror annotation, TypeMirror inputType) {
+    WorkflowStartOptionsModel options =
+        new WorkflowStartOptionsModel(
+            stringValue(annotation, "taskQueue"),
+            stringValue(annotation, "executionTimeout"),
+            stringValue(annotation, "runTimeout"),
+            stringValue(annotation, "taskTimeout"),
+            stringValue(annotation, "workflowIdReusePolicy"),
+            stringValue(annotation, "workflowIdConflictPolicy"),
+            stringValue(annotation, "retryInitialInterval"),
+            stringValue(annotation, "retryBackoffCoefficient"),
+            stringValue(annotation, "retryMaximumAttempts"),
+            stringValue(annotation, "retryMaximumInterval"),
+            stringArrayValue(annotation, "retryDoNotRetry"),
+            stringValue(annotation, "startDelay"),
+            stringValue(annotation, "priorityKey"),
+            stringValue(annotation, "priorityFairnessKey"),
+            stringValue(annotation, "priorityFairnessWeight"),
+            stringValue(annotation, "summary"),
+            stringValue(annotation, "details"));
+    if (!validWorkflowStartOption(method, "taskQueue", options.taskQueue, inputType)
+        || !validWorkflowStartOption(
+            method, "executionTimeout", options.executionTimeout, inputType)
+        || !validWorkflowStartOption(method, "runTimeout", options.runTimeout, inputType)
+        || !validWorkflowStartOption(method, "taskTimeout", options.taskTimeout, inputType)
+        || !validWorkflowStartOption(
+            method, "workflowIdReusePolicy", options.workflowIdReusePolicy, inputType)
+        || !validWorkflowStartOption(
+            method, "workflowIdConflictPolicy", options.workflowIdConflictPolicy, inputType)
+        || !validWorkflowStartOption(
+            method, "retryInitialInterval", options.retryInitialInterval, inputType)
+        || !validWorkflowStartOption(
+            method, "retryBackoffCoefficient", options.retryBackoffCoefficient, inputType)
+        || !validWorkflowStartOption(
+            method, "retryMaximumAttempts", options.retryMaximumAttempts, inputType)
+        || !validWorkflowStartOption(
+            method, "retryMaximumInterval", options.retryMaximumInterval, inputType)
+        || !validWorkflowStartOption(method, "startDelay", options.startDelay, inputType)
+        || !validWorkflowStartOption(method, "priorityKey", options.priorityKey, inputType)
+        || !validWorkflowStartOption(
+            method, "priorityFairnessKey", options.priorityFairnessKey, inputType)
+        || !validWorkflowStartOption(
+            method, "priorityFairnessWeight", options.priorityFairnessWeight, inputType)
+        || !validWorkflowStartOption(method, "summary", options.summary, inputType)
+        || !validWorkflowStartOption(method, "details", options.details, inputType)) {
+      return null;
+    }
+    for (int i = 0; i < options.retryDoNotRetry.size(); i++) {
+      if (!validWorkflowStartOption(
+          method, "retryDoNotRetry[" + i + "]", options.retryDoNotRetry.get(i), inputType)) {
+        return null;
+      }
+    }
+    if (literal(options.workflowIdReusePolicy) && literal(options.workflowIdConflictPolicy)) {
+      String reusePolicy = shortPolicy(options.workflowIdReusePolicy, "WORKFLOW_ID_REUSE_POLICY_");
+      String conflictPolicy =
+          shortPolicy(options.workflowIdConflictPolicy, "WORKFLOW_ID_CONFLICT_POLICY_");
+      if ("TERMINATE_IF_RUNNING".equals(reusePolicy) && !"UNSPECIFIED".equals(conflictPolicy)) {
+        error(
+            method,
+            "Invalid options: workflowIdConflictPolicy cannot be used with"
+                + " workflowIdReusePolicy TERMINATE_IF_RUNNING");
+        return null;
+      }
+    }
+    return options;
+  }
+
+  private boolean validWorkflowStartOption(
+      Element element, String name, String source, TypeMirror inputType) {
+    if (source.isEmpty()) {
+      return true;
+    }
+    String attribute = "options." + name;
+    TypeElement string = elements.getTypeElement(String.class.getName());
+    if (string == null
+        || !validExpression(element, attribute, source, inputType, string.asType())) {
+      return false;
+    }
+    if (!literal(source)) {
+      return true;
+    }
+    try {
+      validateLiteralWorkflowStartOption(attribute, name, source);
+      return true;
+    } catch (IllegalArgumentException e) {
+      error(element, "Invalid " + e.getMessage());
+      return false;
+    }
+  }
+
+  private boolean literal(String source) {
+    return !source.isEmpty() && !source.contains("#{");
+  }
+
+  private void validateLiteralWorkflowStartOption(String attribute, String name, String value) {
+    if ("executionTimeout".equals(name)
+        || "runTimeout".equals(name)
+        || "taskTimeout".equals(name)
+        || "retryInitialInterval".equals(name)
+        || "retryMaximumInterval".equals(name)) {
+      Duration duration = duration(attribute, value);
+      if (duration.isZero() || duration.isNegative()) {
+        throw new IllegalArgumentException(attribute + " must be greater than zero");
+      }
+    } else if ("startDelay".equals(name)) {
+      if (duration(attribute, value).isNegative()) {
+        throw new IllegalArgumentException(attribute + " must not be negative");
+      }
+    } else if ("workflowIdReusePolicy".equals(name)) {
+      String policy = shortPolicy(value, "WORKFLOW_ID_REUSE_POLICY_");
+      if (!Arrays.asList(
+              "UNSPECIFIED",
+              "ALLOW_DUPLICATE",
+              "ALLOW_DUPLICATE_FAILED_ONLY",
+              "REJECT_DUPLICATE",
+              "TERMINATE_IF_RUNNING")
+          .contains(policy)) {
+        throw new IllegalArgumentException(
+            attribute + " is not a recognized workflow ID reuse policy");
+      }
+    } else if ("workflowIdConflictPolicy".equals(name)) {
+      String policy = shortPolicy(value, "WORKFLOW_ID_CONFLICT_POLICY_");
+      if (!Arrays.asList("UNSPECIFIED", "FAIL", "USE_EXISTING", "TERMINATE_EXISTING")
+          .contains(policy)) {
+        throw new IllegalArgumentException(
+            attribute + " is not a recognized workflow ID conflict policy");
+      }
+    } else if ("retryBackoffCoefficient".equals(name)) {
+      double coefficient = decimal(attribute, value);
+      if (!Double.isFinite(coefficient) || coefficient < 1.0) {
+        throw new IllegalArgumentException(
+            attribute + " must be a finite number greater than or equal to 1.0");
+      }
+    } else if ("retryMaximumAttempts".equals(name) || "priorityKey".equals(name)) {
+      if (integer(attribute, value) < 0) {
+        throw new IllegalArgumentException(attribute + " must not be negative");
+      }
+    } else if ("priorityFairnessWeight".equals(name)) {
+      double weight = decimal(attribute, value);
+      if (!Double.isFinite(weight) || weight < 0.0) {
+        throw new IllegalArgumentException(attribute + " must be a finite, non-negative number");
+      }
+    }
+  }
+
+  private Duration duration(String attribute, String value) {
+    try {
+      return Duration.parse(value);
+    } catch (RuntimeException e) {
+      throw new IllegalArgumentException(attribute + " must be an ISO-8601 duration", e);
+    }
+  }
+
+  private int integer(String attribute, String value) {
+    try {
+      return Integer.parseInt(value);
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(attribute + " must be an integer", e);
+    }
+  }
+
+  private double decimal(String attribute, String value) {
+    try {
+      return Double.parseDouble(value);
+    } catch (NumberFormatException e) {
+      throw new IllegalArgumentException(attribute + " must be a number", e);
+    }
+  }
+
+  private String shortPolicy(String value, String prefix) {
+    String normalized = value.trim().toUpperCase(Locale.ROOT).replace('-', '_');
+    return normalized.startsWith(prefix) ? normalized.substring(prefix.length()) : normalized;
   }
 
   private @Nullable ServiceModel readService(TypeElement service) {
@@ -457,7 +632,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     writer.write("        " + quote(mapping.temporalName) + ",\n");
     writer.write("        " + quote(mapping.idExpression) + ",\n");
     if (mapping.kind == HandlerKind.WORKFLOW) {
-      writer.write("        " + quote(mapping.taskQueueExpression) + ",\n");
+      writer.write("        " + workflowStartOptions(mapping.startOptions) + ",\n");
     }
     writer.write("        " + stringArray(mapping.argumentExpressions) + ",\n");
     writer.write("        " + classArray(mapping.parameterClasses));
@@ -635,6 +810,12 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     return value == null ? "" : (String) value.getValue();
   }
 
+  private @Nullable AnnotationMirror annotationValue(
+      @Nullable AnnotationMirror annotation, String name) {
+    @Nullable AnnotationValue value = values(annotation).get(name);
+    return value == null ? null : (AnnotationMirror) value.getValue();
+  }
+
   private @Nullable TypeMirror typeValue(@Nullable AnnotationMirror annotation, String name) {
     @Nullable AnnotationValue value = values(annotation).get(name);
     return value == null ? null : (TypeMirror) value.getValue();
@@ -728,6 +909,46 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     return result.append('}').toString();
   }
 
+  private String workflowStartOptions(WorkflowStartOptionsModel options) {
+    return "new "
+        + GeneratedNexusOperationHandlers.class.getCanonicalName()
+        + ".WorkflowStartOptionsSpec("
+        + quote(options.taskQueue)
+        + ", "
+        + quote(options.executionTimeout)
+        + ", "
+        + quote(options.runTimeout)
+        + ", "
+        + quote(options.taskTimeout)
+        + ", "
+        + quote(options.workflowIdReusePolicy)
+        + ", "
+        + quote(options.workflowIdConflictPolicy)
+        + ", "
+        + quote(options.retryInitialInterval)
+        + ", "
+        + quote(options.retryBackoffCoefficient)
+        + ", "
+        + quote(options.retryMaximumAttempts)
+        + ", "
+        + quote(options.retryMaximumInterval)
+        + ", "
+        + stringArray(options.retryDoNotRetry)
+        + ", "
+        + quote(options.startDelay)
+        + ", "
+        + quote(options.priorityKey)
+        + ", "
+        + quote(options.priorityFairnessKey)
+        + ", "
+        + quote(options.priorityFairnessWeight)
+        + ", "
+        + quote(options.summary)
+        + ", "
+        + quote(options.details)
+        + ")";
+  }
+
   private String quote(String value) {
     return "\""
         + value
@@ -775,13 +996,90 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     }
   }
 
+  private static final class WorkflowStartOptionsModel {
+    private static final WorkflowStartOptionsModel EMPTY =
+        new WorkflowStartOptionsModel(
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            Collections.<String>emptyList(),
+            "",
+            "",
+            "",
+            "",
+            "",
+            "");
+
+    private final String taskQueue;
+    private final String executionTimeout;
+    private final String runTimeout;
+    private final String taskTimeout;
+    private final String workflowIdReusePolicy;
+    private final String workflowIdConflictPolicy;
+    private final String retryInitialInterval;
+    private final String retryBackoffCoefficient;
+    private final String retryMaximumAttempts;
+    private final String retryMaximumInterval;
+    private final List<String> retryDoNotRetry;
+    private final String startDelay;
+    private final String priorityKey;
+    private final String priorityFairnessKey;
+    private final String priorityFairnessWeight;
+    private final String summary;
+    private final String details;
+
+    private WorkflowStartOptionsModel(
+        String taskQueue,
+        String executionTimeout,
+        String runTimeout,
+        String taskTimeout,
+        String workflowIdReusePolicy,
+        String workflowIdConflictPolicy,
+        String retryInitialInterval,
+        String retryBackoffCoefficient,
+        String retryMaximumAttempts,
+        String retryMaximumInterval,
+        List<String> retryDoNotRetry,
+        String startDelay,
+        String priorityKey,
+        String priorityFairnessKey,
+        String priorityFairnessWeight,
+        String summary,
+        String details) {
+      this.taskQueue = taskQueue;
+      this.executionTimeout = executionTimeout;
+      this.runTimeout = runTimeout;
+      this.taskTimeout = taskTimeout;
+      this.workflowIdReusePolicy = workflowIdReusePolicy;
+      this.workflowIdConflictPolicy = workflowIdConflictPolicy;
+      this.retryInitialInterval = retryInitialInterval;
+      this.retryBackoffCoefficient = retryBackoffCoefficient;
+      this.retryMaximumAttempts = retryMaximumAttempts;
+      this.retryMaximumInterval = retryMaximumInterval;
+      this.retryDoNotRetry = retryDoNotRetry;
+      this.startDelay = startDelay;
+      this.priorityKey = priorityKey;
+      this.priorityFairnessKey = priorityFairnessKey;
+      this.priorityFairnessWeight = priorityFairnessWeight;
+      this.summary = summary;
+      this.details = details;
+    }
+  }
+
   private static final class MappingModel {
     private final HandlerKind kind;
     private final ExecutableElement source;
     private final OperationModel operation;
     private final String temporalName;
     private final String idExpression;
-    private final String taskQueueExpression;
+    private final WorkflowStartOptionsModel startOptions;
     private final List<String> argumentExpressions;
     private final List<String> parameterClasses;
 
@@ -791,7 +1089,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
         OperationModel operation,
         String temporalName,
         String idExpression,
-        String taskQueueExpression,
+        WorkflowStartOptionsModel startOptions,
         List<String> argumentExpressions,
         List<String> parameterClasses) {
       this.kind = kind;
@@ -799,7 +1097,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
       this.operation = operation;
       this.temporalName = temporalName;
       this.idExpression = idExpression;
-      this.taskQueueExpression = taskQueueExpression;
+      this.startOptions = startOptions;
       this.argumentExpressions = argumentExpressions;
       this.parameterClasses = parameterClasses;
     }

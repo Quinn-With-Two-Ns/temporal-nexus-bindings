@@ -188,7 +188,7 @@ public final class DeploymentWorkflowImpl implements DeploymentWorkflow {
   @WorkflowOperation(
       name = "start",
       workflowId = "deployment-#{id}",
-      taskQueue = "deployment-workers")
+      options = @WorkflowStartOptions(taskQueue = "deployment-workers"))
   public DeploymentResult deploy(StartDeploymentInput input) {
     // Workflow implementation.
     throw new UnsupportedOperationException("Example only");
@@ -234,9 +234,11 @@ were compiled.
 - `@UpdateOperation` deliberately fails compilation until asynchronous update support
   is implemented.
 
-Workflow starts use the Nexus worker's task queue by default. Set `taskQueue` to a literal or input
-expression such as `#{routing.taskQueue}` to route the workflow to another worker. Other execution
-settings retain Temporal SDK defaults.
+Workflow starts use the Nexus worker's task queue by default. Set
+`options = @WorkflowStartOptions(taskQueue = "...")` to route the workflow to another worker.
+`WorkflowStartOptions` also configures workflow timeouts, ID policies, retries, start delay,
+priority, summary, and details. Every option accepts a literal or the same input expressions used
+by workflow IDs and arguments.
 
 Expressions can also read Nexus request metadata:
 
@@ -246,10 +248,10 @@ Expressions can also read Nexus request metadata:
 - `#{payload}` and `#{input}` return the complete operation payload. Use an explicit path such as
   `#{payload.requestId}` when desired; unqualified paths remain payload paths.
 
-These roots are available in `workflowId`, `taskQueue`, and `arguments`, including inside templates
-such as `deployment-#{nexus.requestId}`. A missing header fails the Nexus call as a bad request, just
-like other missing map keys. The `nexus` identifier is reserved; address a payload property with
-that name explicitly as `#{payload.nexus}`.
+These roots are available in `workflowId`, `WorkflowStartOptions`, and `arguments`, including
+inside templates such as `deployment-#{nexus.requestId}`. A missing header fails the Nexus call as
+a bad request, just like other missing map keys. The `nexus` identifier is reserved; address a
+payload property with that name explicitly as `#{payload.nexus}`.
 
 Every operation in a referenced Nexus service must have exactly one annotated mapping. Missing,
 duplicate, incompatible, or malformed mappings fail compilation.
@@ -270,13 +272,29 @@ The annotation-specific parameters are:
 | --- | --- | --- | --- |
 | `@ServiceMapping` | `value` | Required | Default typed Nexus `@Service` interface for operation annotations on the Temporal workflow or activity implementation class. |
 | `@WorkflowOperation` | `workflowId` | Required | Literal or input-expression template that must produce a non-empty workflow ID. |
-| `@WorkflowOperation` | `taskQueue` | `""` | Literal or input-expression template for the workflow task queue. The empty default uses the task queue of the Nexus worker handling the operation; an explicit value must produce a non-empty string. |
+| `@WorkflowOperation` | `options` | `@WorkflowStartOptions` | Options used to start the workflow. Empty members retain Temporal SDK defaults. |
 | `@SignalOperation` | `workflowId` | Required | Literal or input-expression template that must produce the non-empty ID of the workflow to signal. |
 | `@QueryOperation` | `workflowId` | Required | Literal or input-expression template that must produce the non-empty ID of the workflow to query. |
 | `@UpdateOperation` | `workflowId` | Required | Intended workflow ID expression for the workflow to update. Update mappings are currently rejected during compilation. |
 | `@ActivityOperation` | `activityId` | Required | Intended activity ID expression. Activity mappings are currently rejected during compilation. |
 | `@ActivityOperation` | `scheduleToCloseTimeout` | `""` | Intended schedule-to-close timeout; empty leaves it unspecified. Activity mappings are currently rejected during compilation. |
 | `@ActivityOperation` | `startToCloseTimeout` | `""` | Intended start-to-close timeout for each attempt; empty leaves it unspecified. Activity mappings are currently rejected during compilation. |
+
+`@WorkflowStartOptions` supports:
+
+| Parameter | Value |
+| --- | --- |
+| `taskQueue` | Workflow task queue. Empty inherits the Nexus worker's task queue. |
+| `executionTimeout`, `runTimeout`, `taskTimeout`, `startDelay` | ISO-8601 durations such as `PT30S` or expressions that produce them. |
+| `workflowIdReusePolicy`, `workflowIdConflictPolicy` | Full Temporal enum names or short names such as `REJECT_DUPLICATE` and `FAIL`. |
+| `retryInitialInterval`, `retryMaximumInterval` | ISO-8601 retry durations. |
+| `retryBackoffCoefficient`, `retryMaximumAttempts` | Numeric retry settings represented as literals or expressions. |
+| `retryDoNotRetry` | Failure type names; each array entry may be an expression. |
+| `priorityKey`, `priorityFairnessKey`, `priorityFairnessWeight` | Temporal workflow priority settings. |
+| `summary`, `details` | Temporal Markdown text; templates may include input and Nexus metadata expressions. |
+
+An empty option is not applied. Invalid literals fail annotation processing. Invalid values
+produced at runtime become non-retryable Nexus `BAD_REQUEST` errors.
 
 `service`, `name`, and `arguments` also exist on the currently unsupported activity and update
 annotations, but the processor rejects those mappings before using any of their parameters.

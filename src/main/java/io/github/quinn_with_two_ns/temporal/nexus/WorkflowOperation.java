@@ -48,15 +48,11 @@ public @interface WorkflowOperation {
   String workflowId();
 
   /**
-   * The task queue on which to start the workflow.
+   * Options used to start the workflow.
    *
-   * <p>The value may be a literal, an input expression, or a template containing input expressions.
-   * An empty value uses the task queue of the Nexus worker handling the operation. A non-empty
-   * value must evaluate to a non-empty string.
-   *
-   * @return the task queue expression, or an empty string to use the Nexus worker's task queue
+   * @return workflow start options
    */
-  String taskQueue() default "";
+  WorkflowStartOptions options() default @WorkflowStartOptions;
 
   /**
    * Expressions that produce the Temporal workflow method arguments, in parameter order.

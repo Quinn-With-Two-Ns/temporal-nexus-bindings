@@ -28,7 +28,7 @@ implementation cost.
 
 ### Configure workflow execution
 
-- [ ] Support the most commonly needed `WorkflowOptions`:
+- [x] Support the most commonly needed `WorkflowOptions`:
   - Workflow execution, run, and task timeouts.
   - Workflow ID reuse and conflict policies.
   - Retry policy.
@@ -37,10 +37,10 @@ implementation cost.
   - Static summary and details.
 - [ ] Design an options-provider extension point for complex settings such as memo, typed search
       attributes, and versioning overrides.
-- [ ] Keep common scalar settings convenient without turning `@WorkflowOperation` into an
+- [x] Keep common scalar settings convenient without turning `@WorkflowOperation` into an
       unbounded mirror of `WorkflowOptions`.
-- [ ] Validate literal option values during annotation processing.
-- [ ] Add generated-handler tests proving configured values reach the Temporal client.
+- [x] Validate literal option values during annotation processing.
+- [x] Add generated-handler tests proving configured values reach the Temporal client.
 
 ### Implement workflow updates
 
