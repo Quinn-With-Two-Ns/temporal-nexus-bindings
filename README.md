@@ -218,11 +218,13 @@ The processor generates one complete class named
 
 ```java
 worker.registerWorkflowImplementationTypes(DeploymentWorkflowImpl.class);
-worker.registerNexusServiceImplementation(DeploymentServiceNexusBindings.create());
+DeploymentServiceNexusBindings.register(worker);
 ```
 
 Explicit registration means generated services are not exposed merely because their annotations
-were compiled.
+were compiled. `register(worker)` returns the concrete generated binding. Use the typed
+`DeploymentServiceNexusBindings.create()` method instead when registration needs to be handled
+separately.
 
 ## Supported mappings
 

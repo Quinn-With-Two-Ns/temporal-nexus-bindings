@@ -63,10 +63,10 @@ implementation cost.
 
 ## P1 — Generated API ergonomics
 
-- [ ] Change generated `create()` methods to return the generated binding type instead of `Object`.
-- [ ] Consider a generated registration helper while preserving explicit service exposure.
-- [ ] Mark generated sources with an appropriate `@Generated` annotation.
-- [ ] Include the originating service and operation in generated-code diagnostics.
+- [x] Change generated `create()` methods to return the generated binding type instead of `Object`.
+- [x] Add a generated registration helper while preserving explicit service exposure.
+- [x] Mark generated sources with a source-level-appropriate `@Generated` annotation.
+- [x] Include the originating service and operation in generated-code documentation.
 - [ ] Add a complete example application showing:
   - Worker and Nexus endpoint setup.
   - Explicit generated-service registration.

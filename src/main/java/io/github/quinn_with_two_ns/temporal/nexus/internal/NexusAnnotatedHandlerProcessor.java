@@ -589,16 +589,45 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
         writer.write("package " + service.packageName + ";\n\n");
       }
       writer.write(
+          "/** Generated Nexus binding for {@code "
+              + javadocText(service.service.getQualifiedName().toString())
+              + "}. */\n");
+      writer.write(
+          "@"
+              + generatedAnnotation()
+              + "(value = "
+              + quote(NexusAnnotatedHandlerProcessor.class.getName())
+              + ")\n");
+      writer.write(
           "@io.nexusrpc.handler.ServiceImpl(service = "
               + service.service.getQualifiedName()
               + ".class)\n");
       writer.write("public final class " + service.generatedClassName + " {\n");
       writer.write("  private " + service.generatedClassName + "() {}\n\n");
       writer.write(
-          "  public static Object create() {\n"
+          "  /** Creates this generated Nexus binding. */\n"
+              + "  public static "
+              + service.generatedClassName
+              + " create() {\n"
               + "    return new "
               + service.generatedClassName
               + "();\n"
+              + "  }\n");
+      writer.write(
+          "\n  /**\n"
+              + "   * Creates and registers this generated Nexus binding.\n"
+              + "   *\n"
+              + "   * @param worker worker that will expose the typed Nexus service\n"
+              + "   * @return the registered binding\n"
+              + "   */\n"
+              + "  public static "
+              + service.generatedClassName
+              + " register(io.temporal.worker.Worker worker) {\n"
+              + "    "
+              + service.generatedClassName
+              + " binding = create();\n"
+              + "    worker.registerNexusServiceImplementation(binding);\n"
+              + "    return binding;\n"
               + "  }\n");
 
       List<MappingModel> mappings = new ArrayList<>(service.mappings.values());
@@ -614,7 +643,16 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
       throws IOException {
     String inputType = sourceType(mapping.operation.inputType);
     String outputType = sourceType(mapping.operation.outputType);
-    writer.write("\n  @io.nexusrpc.handler.OperationImpl\n");
+    String nexusOperation = service.service.getQualifiedName() + "#" + mapping.operation.methodName;
+    String temporalHandler =
+        mapping.source.getEnclosingElement() + "#" + mapping.source.getSimpleName();
+    writer.write(
+        "\n  /** Binds Nexus operation {@code "
+            + javadocText(nexusOperation)
+            + "} to Temporal handler {@code "
+            + javadocText(temporalHandler)
+            + "}. */\n");
+    writer.write("  @io.nexusrpc.handler.OperationImpl\n");
     writer.write(
         "  public io.nexusrpc.handler.OperationHandler<"
             + inputType
@@ -957,6 +995,20 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
             .replace("\n", "\\n")
             .replace("\r", "\\r")
         + "\"";
+  }
+
+  private String generatedAnnotation() {
+    return processingEnv.getSourceVersion().compareTo(SourceVersion.RELEASE_8) > 0
+        ? "javax.annotation.processing.Generated"
+        : "javax.annotation.Generated";
+  }
+
+  private String javadocText(String value) {
+    return value
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("*/", "*&#47;");
   }
 
   private void error(Element element, String message) {

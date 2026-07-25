@@ -9,11 +9,14 @@ import io.github.quinn_with_two_ns.temporal.nexus.internal.NexusAnnotatedHandler
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.tools.DiagnosticCollector;
@@ -24,6 +27,56 @@ import javax.tools.ToolProvider;
 import org.junit.Test;
 
 public class ProcessorValidationTest {
+  @Test
+  public void generatesTypedRegistrationApiAndOriginDocumentation() throws IOException {
+    String testSource =
+        source(
+            "  @Service interface DeploymentService {\n"
+                + "    @Operation String start(String input);\n"
+                + "  }\n"
+                + workflowInterface("@WorkflowMethod String run(String input);")
+                + "  static class WorkflowImpl implements WorkflowContract {\n"
+                + "    @Override\n"
+                + "    @WorkflowOperation(service = DeploymentService.class,"
+                + " name = \"start\", workflowId = \"#{input}\")\n"
+                + "    public String run(String input) { return input; }\n"
+                + "  }\n");
+
+    Compilation java8Compilation = compile("GeneratedApiJava8", testSource, "8");
+    assertTrue(java8Compilation.messages, java8Compilation.success);
+    String java8Source =
+        java8Compilation.generatedSources.get("test/DeploymentServiceNexusBindings.java");
+    assertNotNull(java8Compilation.generatedSources.toString(), java8Source);
+    assertTrue(java8Source, java8Source.contains("@javax.annotation.Generated("));
+    assertTrue(
+        java8Source, java8Source.contains("public static DeploymentServiceNexusBindings create()"));
+    assertFalse(java8Source, java8Source.contains("public static Object create()"));
+    assertTrue(
+        java8Source,
+        java8Source.contains(
+            "public static DeploymentServiceNexusBindings register("
+                + "io.temporal.worker.Worker worker)"));
+    assertTrue(
+        java8Source, java8Source.contains("worker.registerNexusServiceImplementation(binding);"));
+    assertTrue(
+        java8Source,
+        java8Source.contains(
+            "Generated Nexus binding for {@code test.TestSource.DeploymentService}"));
+    assertTrue(
+        java8Source,
+        java8Source.contains("Nexus operation {@code test.TestSource.DeploymentService#start}"));
+    assertTrue(
+        java8Source,
+        java8Source.contains("Temporal handler {@code test.TestSource.WorkflowImpl#run}"));
+
+    Compilation modernCompilation = compile("GeneratedApiModern", testSource, "17");
+    assertTrue(modernCompilation.messages, modernCompilation.success);
+    String modernSource =
+        modernCompilation.generatedSources.get("test/DeploymentServiceNexusBindings.java");
+    assertNotNull(modernCompilation.generatedSources.toString(), modernSource);
+    assertTrue(modernSource, modernSource.contains("@javax.annotation.processing.Generated("));
+  }
+
   @Test
   public void acceptsMappingsSplitAcrossMultipleWorkflowImplementationClasses() throws IOException {
     Compilation compilation =
@@ -633,6 +686,11 @@ public class ProcessorValidationTest {
   }
 
   private static Compilation compile(String name, String source) throws IOException {
+    return compile(name, source, "8");
+  }
+
+  private static Compilation compile(String name, String source, String sourceVersion)
+      throws IOException {
     JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
     assertNotNull("Tests require a JDK", compiler);
     Path root = Files.createTempDirectory("nexus-annotation-processor-" + name);
@@ -655,10 +713,8 @@ public class ProcessorValidationTest {
                 classes.toString(),
                 "-s",
                 generated.toString(),
-                "-source",
-                "8",
-                "-target",
-                "8",
+                "--release",
+                sourceVersion,
                 "-proc:only");
         JavaCompiler.CompilationTask task =
             compiler.getTask(null, fileManager, diagnostics, options, null, units);
@@ -668,16 +724,18 @@ public class ProcessorValidationTest {
             diagnostics.getDiagnostics().stream()
                 .map(diagnostic -> diagnostic.getMessage(Locale.ROOT))
                 .collect(Collectors.joining("\n"));
-        List<String> generatedFiles;
-        try (Stream<Path> generatedPaths = Files.walk(generated)) {
-          generatedFiles =
-              generatedPaths
-                  .filter(Files::isRegularFile)
-                  .map(path -> generated.relativize(path).toString().replace('\\', '/'))
-                  .sorted()
-                  .collect(Collectors.toList());
+        List<Path> generatedFilePaths;
+        try (Stream<Path> paths = Files.walk(generated)) {
+          generatedFilePaths =
+              paths.filter(Files::isRegularFile).sorted().collect(Collectors.toList());
         }
-        return new Compilation(success, messages, generatedFiles);
+        Map<String, String> generatedSources = new LinkedHashMap<>();
+        for (Path path : generatedFilePaths) {
+          String relativePath = generated.relativize(path).toString().replace('\\', '/');
+          generatedSources.put(relativePath, new String(Files.readAllBytes(path), UTF_8));
+        }
+        return new Compilation(
+            success, messages, new ArrayList<>(generatedSources.keySet()), generatedSources);
       }
     } finally {
       try (Stream<Path> paths = Files.walk(root)) {
@@ -697,11 +755,17 @@ public class ProcessorValidationTest {
     private final boolean success;
     private final String messages;
     private final List<String> generatedFiles;
+    private final Map<String, String> generatedSources;
 
-    private Compilation(boolean success, String messages, List<String> generatedFiles) {
+    private Compilation(
+        boolean success,
+        String messages,
+        List<String> generatedFiles,
+        Map<String, String> generatedSources) {
       this.success = success;
       this.messages = messages;
       this.generatedFiles = generatedFiles;
+      this.generatedSources = generatedSources;
     }
   }
 }

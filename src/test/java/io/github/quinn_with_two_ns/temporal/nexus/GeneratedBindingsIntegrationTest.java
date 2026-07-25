@@ -41,7 +41,7 @@ public class GeneratedBindingsIntegrationTest {
 
   @Test
   public void generatesCompleteServiceSplitAcrossWorkflowClasses() {
-    Object generatedService = DeploymentServiceNexusBindings.create();
+    DeploymentServiceNexusBindings generatedService = DeploymentServiceNexusBindings.create();
     ServiceImplInstance service = ServiceImplInstance.fromInstance(generatedService);
 
     assertEquals("DeploymentService", service.getDefinition().getName());
@@ -63,7 +63,7 @@ public class GeneratedBindingsIntegrationTest {
         TestWorkflowEnvironment.newInstance(environmentOptions)) {
       Worker nexusWorker = environment.newWorker(NEXUS_TASK_QUEUE);
       nexusWorker.registerWorkflowImplementationTypes(CallerWorkflowImpl.class);
-      nexusWorker.registerNexusServiceImplementation(DeploymentServiceNexusBindings.create());
+      DeploymentServiceNexusBindings.register(nexusWorker);
       Worker workflowWorker = environment.newWorker(WORKFLOW_TASK_QUEUE);
       workflowWorker.registerWorkflowImplementationTypes(
           DeploymentWorkflowImpl.class, MetadataWorkflowImpl.class);
