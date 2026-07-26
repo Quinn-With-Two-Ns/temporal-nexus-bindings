@@ -60,6 +60,25 @@ implementation cost.
 - [ ] Add handler-factory, generated-binding, and end-to-end coverage for every built-in behavior
       and custom-handler delegation.
 
+### Control operation failure handling
+
+- [ ] Define an `OperationFailureHandler<R>` extension point that can propagate a Temporal
+      invocation failure, translate it to a Nexus failure, or recover with a successful result.
+- [ ] Add a `failureHandler` class-literal parameter to each operation-mapping annotation, with the
+      standard Temporal-to-Nexus behavior as its default.
+- [ ] Provide built-in handler implementations for:
+  - Standard Temporal-to-Nexus failure handling.
+  - Ignoring `WorkflowNotFoundException` for `Void` operations.
+  - Translating `WorkflowNotFoundException` to a Nexus `NOT_FOUND` failure.
+- [ ] Allow custom handlers with an accessible no-argument constructor and validate during
+      annotation processing that their result type is compatible with the Nexus operation output.
+- [ ] Reject the ignore-not-found handler on non-`Void` operations; require those operations to use
+      a custom handler that supplies an explicit fallback result.
+- [ ] Invoke failure handlers only for failures from the outbound Temporal operation so input
+      expression and option-validation `BAD_REQUEST` failures cannot be swallowed.
+- [ ] Instantiate each configured handler once, document the thread-safety requirement, and add
+      processor, runtime, and end-to-end coverage for default, built-in, and custom behavior.
+
 ### Implement workflow updates
 
 - [ ] Implement synchronous `@UpdateOperation` using `WorkflowStub.update`.
@@ -85,6 +104,30 @@ implementation cost.
 - [x] Add a generated registration helper while preserving explicit service exposure.
 - [x] Mark generated sources with a source-level-appropriate `@Generated` annotation.
 - [x] Include the originating service and operation in generated-code documentation.
+
+### Compose generated and handwritten operation handlers
+
+- [ ] Define a processor-only `@NexusServiceFragment(service = ...)` annotation for classes that
+      contribute handwritten handlers to an otherwise generated Nexus service.
+- [ ] Reuse Nexus SDK `@OperationImpl` methods inside fragments instead of introducing another
+      operation-handler method contract.
+- [ ] Generate one complete `@ServiceImpl` wrapper that delegates each operation to exactly one
+      annotation-generated handler or fragment method; fragments must not be directly registerable
+      as partial Nexus service implementations.
+- [ ] Generate typed `create(...)` and `register(...)` methods that require all fragment instances,
+      allowing callers to construct fragments with application dependencies.
+- [ ] Validate fragment methods during annotation processing:
+  - The method is public, non-static, non-generic, parameterless, and has no `throws` clause.
+  - Its name identifies an operation in the selected typed Nexus service.
+  - Its `OperationHandler` input and output types match the service operation.
+  - Every service operation has exactly one generated or handwritten provider.
+- [ ] Report missing and duplicate providers with both contributing source locations.
+- [ ] Call each fragment handler factory once while constructing the generated service binding.
+- [ ] Initially require fragments and annotation mappings for one service to be visible in the same
+      annotation-processing compilation, consistent with the existing aggregation boundary.
+- [ ] Add processor and end-to-end coverage for generated-only, fragment-only, hybrid,
+      dependency-injected, missing, duplicate, and type-incompatible compositions.
+
 - [ ] Add a complete example application showing:
   - Worker and Nexus endpoint setup.
   - Explicit generated-service registration.
