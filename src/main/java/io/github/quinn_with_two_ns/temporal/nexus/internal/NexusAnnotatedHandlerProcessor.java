@@ -51,6 +51,10 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   private static final String ACTIVITY = PACKAGE + "ActivityOperation";
   private static final String SERVICE_MAPPING = PACKAGE + "ServiceMapping";
 
+  /** Fixed processing order so diagnostics and duplicate-mapping precedence are deterministic. */
+  private static final List<String> OPERATION_ANNOTATIONS =
+      Collections.unmodifiableList(Arrays.asList(WORKFLOW, SIGNAL, QUERY, UPDATE, ACTIVITY));
+
   private static final String NEXUS_SERVICE = "io.nexusrpc.Service";
   private static final String NEXUS_OPERATION = "io.nexusrpc.Operation";
   private static final String WORKFLOW_INTERFACE = "io.temporal.workflow.WorkflowInterface";
@@ -78,7 +82,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
 
   @Override
   public Set<String> getSupportedAnnotationTypes() {
-    Set<String> annotations = operationAnnotationTypes();
+    Set<String> annotations = new HashSet<>(OPERATION_ANNOTATIONS);
     annotations.add(SERVICE_MAPPING);
     return annotations;
   }
@@ -96,7 +100,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     }
     Map<String, ServiceModel> services = new LinkedHashMap<>();
     boolean valid = validateServiceMappings(roundEnvironment);
-    for (String annotationName : operationAnnotationTypes()) {
+    for (String annotationName : OPERATION_ANNOTATIONS) {
       @Nullable TypeElement annotation = elements.getTypeElement(annotationName);
       if (annotation == null) {
         continue;
@@ -131,10 +135,6 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     }
     generated = true;
     return false;
-  }
-
-  private Set<String> operationAnnotationTypes() {
-    return new HashSet<>(Arrays.asList(WORKFLOW, SIGNAL, QUERY, UPDATE, ACTIVITY));
   }
 
   private boolean validateServiceMappings(RoundEnvironment roundEnvironment) {
@@ -836,8 +836,12 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     if (annotation == null) {
       return result;
     }
+    // Only explicit values are read. Defaults stored in the annotation class files may surface as
+    // unresolved javac proxies whose AnnotationValue.getValue() throws, depending on class
+    // completion order. Every default in this API is empty, so absent values fall back to the same
+    // empty string, empty array, or null the extraction helpers already produce.
     for (Map.Entry<? extends ExecutableElement, ? extends AnnotationValue> entry :
-        elements.getElementValuesWithDefaults(annotation).entrySet()) {
+        annotation.getElementValues().entrySet()) {
       result.put(entry.getKey().getSimpleName().toString(), entry.getValue());
     }
     return result;
