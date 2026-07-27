@@ -39,9 +39,11 @@ final class InputExpression {
       StringBuilder result = new StringBuilder();
       for (ExpressionModel.Segment segment : model.segments) {
         @Nullable Object part = evaluate(segment, input, requestId, headers);
-        if (part != null) {
-          result.append(part);
+        if (part == null) {
+          throw new IllegalArgumentException(
+              "expression \"" + model.source + "\" evaluated to null within a template");
         }
+        result.append(part);
       }
       value = result.toString();
     }

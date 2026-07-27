@@ -256,7 +256,8 @@ Expressions can also read Nexus request metadata:
 
 These roots are available in `workflowId`, `WorkflowStartOptions`, and `arguments`, including
 inside templates such as `deployment-#{nexus.requestId}`. A missing header fails the Nexus call as
-a bad request, just like other missing map keys. The `nexus` identifier is reserved; address a
+a bad request, just like other missing map keys. An expression that evaluates to null inside a
+template also fails the call as a bad request rather than silently producing a shorter string. The `nexus` identifier is reserved; address a
 payload property with that name explicitly as `#{payload.nexus}`.
 
 Every operation in a referenced Nexus service must have exactly one annotated mapping. Missing,

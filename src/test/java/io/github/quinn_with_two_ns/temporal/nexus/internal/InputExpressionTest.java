@@ -212,6 +212,32 @@ public class InputExpressionTest {
     }
   }
 
+  @Test
+  public void rejectsNullTemplateParts() {
+    NullableId nullId = new NullableId(null);
+    NullableId presentId = new NullableId("deployment-7");
+
+    assertEvaluationFailure(
+        InputExpression.compile("wf-#{id}"),
+        nullId,
+        String.class,
+        "evaluated to null within a template");
+    assertEquals(
+        "wf-deployment-7", InputExpression.compile("wf-#{id}").evaluate(presentId, String.class));
+  }
+
+  public static final class NullableId {
+    private final @Nullable String id;
+
+    NullableId(@Nullable String id) {
+      this.id = id;
+    }
+
+    public @Nullable String getId() {
+      return id;
+    }
+  }
+
   private static void assertCompileFailure(String source, String expected) {
     try {
       InputExpression.compile(source);
