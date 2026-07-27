@@ -1,9 +1,11 @@
 package io.github.quinn_with_two_ns.temporal.nexus.internal;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.fail;
 
+import java.math.BigDecimal;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
@@ -127,6 +129,55 @@ public class InputExpressionTest {
     assertEquals(Integer.valueOf(42), InputExpression.compile("#{42}").evaluate(null, int.class));
     assertEquals(true, InputExpression.compile("#{true}").evaluate(null, Boolean.class));
     assertEquals("value", InputExpression.compile("#{'value'}").evaluate(null, String.class));
+  }
+
+  @Test
+  public void evaluatesConstantExpressions() {
+    assertNull(InputExpression.compile("#{null}").evaluate(null, String.class));
+    assertEquals(false, InputExpression.compile("#{false}").evaluate(null, boolean.class));
+    assertEquals(
+        new BigDecimal("1.5"), InputExpression.compile("#{1.5}").evaluate(null, BigDecimal.class));
+    assertEquals(
+        Double.valueOf(1.5), InputExpression.compile("#{1.5}").evaluate(null, double.class));
+    assertEquals(Long.valueOf(42), InputExpression.compile("#{42}").evaluate(null, Long.class));
+    assertEquals(
+        Character.valueOf('a'), InputExpression.compile("#{'a'}").evaluate(null, char.class));
+  }
+
+  @Test
+  public void reportsNumericNullAndCharacterConversionFailures() {
+    assertEvaluationFailure(
+        InputExpression.compile("#{4294967296}"),
+        null,
+        Integer.class,
+        "cannot be converted losslessly");
+    assertEvaluationFailure(
+        InputExpression.compile("#{1.5}"), null, Integer.class, "cannot be converted losslessly");
+    assertEvaluationFailure(
+        InputExpression.compile("#{null}"), null, int.class, "evaluated to null for int");
+    assertEvaluationFailure(
+        InputExpression.compile("#{'ab'}"), null, char.class, "cannot be converted");
+  }
+
+  @Test
+  public void reportsContainerMisuse() {
+    Input input = new Input("deployment-7", new Nested("west"), "public-value");
+
+    assertEvaluationFailure(
+        InputExpression.compile("#{nestedArray[1]}"), input, Nested.class, "index 1 out of bounds");
+    assertEvaluationFailure(
+        InputExpression.compile("#{id['key']}"),
+        input,
+        String.class,
+        "map key access requires a Map");
+  }
+
+  @Test
+  public void rejectsAllForbiddenProperties() {
+    assertCompileFailure("#{getClass}", "forbidden property");
+    assertCompileFailure("#{classLoader}", "forbidden property");
+    assertCompileFailure("#{declaringClass}", "forbidden property");
+    assertCompileFailure("#{nested.class}", "forbidden property");
   }
 
   @Test
