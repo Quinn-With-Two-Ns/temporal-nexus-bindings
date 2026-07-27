@@ -235,6 +235,9 @@ separately.
 - `@WorkflowOperation` starts a workflow asynchronously.
 - `@SignalOperation` signals an existing workflow synchronously.
 - `@QueryOperation` queries an existing workflow synchronously.
+
+Signal and query operations addressing a workflow ID with no known execution fail the Nexus call
+as a non-retryable not-found error.
 - `@ActivityOperation` deliberately fails compilation while this library targets Temporal Java
   SDK 1.37.0, which does not expose the Nexus activity bridge needed for asynchronous completion.
 - `@UpdateOperation` deliberately fails compilation until asynchronous update support

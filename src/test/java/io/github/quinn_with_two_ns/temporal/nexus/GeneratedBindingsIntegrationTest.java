@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 
 import io.nexusrpc.Operation;
 import io.nexusrpc.Service;
+import io.nexusrpc.handler.HandlerException;
 import io.nexusrpc.handler.ServiceImplInstance;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.common.RetryOptions;
@@ -12,6 +13,7 @@ import io.temporal.common.interceptors.WorkflowInboundCallsInterceptor;
 import io.temporal.common.interceptors.WorkflowInboundCallsInterceptorBase;
 import io.temporal.common.interceptors.WorkflowOutboundCallsInterceptor;
 import io.temporal.common.interceptors.WorkflowOutboundCallsInterceptorBase;
+import io.temporal.failure.NexusOperationFailure;
 import io.temporal.testing.TestEnvironmentOptions;
 import io.temporal.testing.TestWorkflowEnvironment;
 import io.temporal.worker.Worker;
@@ -83,6 +85,61 @@ public class GeneratedBindingsIntegrationTest {
       assertEquals(
           "running:cancelled demo:true:true",
           caller.call(new StartDeploymentInput("deployment-7", "demo", WORKFLOW_TASK_QUEUE)));
+    }
+  }
+
+  @Test
+  public void signalToMissingWorkflowFailsWithNotFound() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      Worker nexusWorker = environment.newWorker(NEXUS_TASK_QUEUE);
+      nexusWorker.registerWorkflowImplementationTypes(MissingWorkflowCallerImpl.class);
+      DeploymentServiceNexusBindings.register(nexusWorker);
+      environment.createNexusEndpoint(ENDPOINT, NEXUS_TASK_QUEUE);
+      environment.start();
+
+      MissingWorkflowCaller caller =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  MissingWorkflowCaller.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId("missing-workflow-caller")
+                      .setTaskQueue(NEXUS_TASK_QUEUE)
+                      .build());
+
+      assertEquals("NOT_FOUND", caller.call("no-such-workflow"));
+    }
+  }
+
+  @WorkflowInterface
+  public interface MissingWorkflowCaller {
+    @WorkflowMethod
+    String call(String workflowId);
+  }
+
+  public static class MissingWorkflowCallerImpl implements MissingWorkflowCaller {
+    @Override
+    public String call(String workflowId) {
+      NexusServiceOptions serviceOptions =
+          NexusServiceOptions.newBuilder()
+              .setEndpoint(ENDPOINT)
+              .setOperationOptions(
+                  NexusOperationOptions.newBuilder()
+                      .setScheduleToCloseTimeout(Duration.ofSeconds(10))
+                      .build())
+              .build();
+      DeploymentService service =
+          Workflow.newNexusServiceStub(DeploymentService.class, serviceOptions);
+      try {
+        service.cancel(new CancelDeploymentInput(workflowId, "unused"));
+        return "unexpected-success";
+      } catch (NexusOperationFailure e) {
+        @Nullable Throwable cause = e.getCause();
+        if (cause instanceof HandlerException) {
+          return ((HandlerException) cause).getErrorType().toString();
+        }
+        return "unexpected-cause: " + cause;
+      }
     }
   }
 
