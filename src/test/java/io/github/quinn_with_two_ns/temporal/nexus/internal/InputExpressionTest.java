@@ -139,6 +139,20 @@ public class InputExpressionTest {
     assertCompileFailure("#{nexus}", "requires requestId or headers");
     assertCompileFailure("#{nexus.unknown}", "unsupported Nexus metadata property");
     assertCompileFailure("#{id", "unterminated expression");
+    assertCompileFailure("#{nestedItems[0]region}", "unsupported path syntax");
+    assertCompileFailure("#{.id}", "path cannot start with '.'");
+    assertCompileFailure("#{'a' 'b'}", "unsupported path syntax");
+    assertCompileFailure("#{metadata['key'}", "unterminated container access");
+  }
+
+  @Test
+  public void unescapesQuotedStringsAndBracketKeys() {
+    assertEquals("it's", InputExpression.compile("#{'it\\'s'}").evaluate(null, String.class));
+    assertEquals("a\\b", InputExpression.compile("#{'a\\\\b'}").evaluate(null, String.class));
+    assertEquals(
+        "value",
+        InputExpression.compile("#{['a]b']}")
+            .evaluate(Collections.singletonMap("a]b", "value"), String.class));
   }
 
   @Test
