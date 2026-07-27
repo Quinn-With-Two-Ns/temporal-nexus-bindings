@@ -50,7 +50,28 @@ final class ExpressionTypeValidator {
 
   private InferredType infer(ExpressionModel expression, TypeMirror inputType) {
     if (!expression.singleExpression) {
-      return known(type(STRING));
+      TypeMirror string = type(STRING);
+      for (ExpressionModel.Segment segment : expression.segments) {
+        if (segment instanceof ExpressionModel.LiteralSegment) {
+          continue;
+        }
+        InferredType part = infer(segment, inputType);
+        if (part.dynamic) {
+          continue;
+        }
+        TypeMirror partType = Objects.requireNonNull(part.type);
+        if (partType.getKind() == TypeKind.NULL) {
+          throw new IllegalArgumentException("template expressions must not evaluate to null");
+        }
+        if (!canCoerce(partType, string)) {
+          throw new IllegalArgumentException(
+              "template expression produces "
+                  + partType
+                  + ", which cannot be converted to "
+                  + string);
+        }
+      }
+      return known(string);
     }
     return infer(expression.segments.get(0), inputType);
   }

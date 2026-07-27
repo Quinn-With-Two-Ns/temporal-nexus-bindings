@@ -597,6 +597,52 @@ public class ProcessorValidationTest {
   }
 
   @Test
+  public void rejectsMissingPropertyInsideTemplateExpression() throws IOException {
+    Compilation compilation =
+        compile(
+            "MissingTemplateProperty",
+            source(
+                "  static class DeployInput {\n"
+                    + "    public String getId() { return \"id\"; }\n"
+                    + "  }\n"
+                    + "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(DeployInput input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(DeployInput value);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"wf-#{missing}\")\n"
+                    + "    public String run(DeployInput value) { return \"x\"; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation, "Invalid workflowId expression: property \"missing\" does not exist");
+  }
+
+  @Test
+  public void rejectsNullConstantInsideTemplateExpression() throws IOException {
+    Compilation compilation =
+        compile(
+            "NullTemplateConstant",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String value);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"wf-#{null}\")\n"
+                    + "    public String run(String value) { return value; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "Invalid workflowId expression: template expressions must not evaluate to null");
+  }
+
+  @Test
   public void rejectsExpressionTypeMismatch() throws IOException {
     Compilation compilation =
         compile(
