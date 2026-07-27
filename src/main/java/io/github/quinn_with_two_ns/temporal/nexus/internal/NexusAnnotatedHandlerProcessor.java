@@ -123,6 +123,23 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     for (ServiceModel service : services.values()) {
       valid &= validateCompleteService(service);
     }
+    Map<String, ServiceModel> generatedNames = new HashMap<>();
+    for (ServiceModel service : services.values()) {
+      @Nullable ServiceModel existing =
+          generatedNames.put(service.qualifiedGeneratedName(), service);
+      if (existing != null) {
+        error(
+            service.service,
+            "Generated class "
+                + service.qualifiedGeneratedName()
+                + " for "
+                + service.service.getQualifiedName()
+                + " collides with the binding generated for "
+                + existing.service.getQualifiedName()
+                + "; rename one service or move it to another package");
+        valid = false;
+      }
+    }
     if (valid) {
       for (ServiceModel service : services.values()) {
         try {
@@ -573,10 +590,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   }
 
   private void generateService(ServiceModel service) throws IOException {
-    String qualifiedName =
-        service.packageName.isEmpty()
-            ? service.generatedClassName
-            : service.packageName + "." + service.generatedClassName;
+    String qualifiedName = service.qualifiedGeneratedName();
     List<Element> origins = new ArrayList<>();
     origins.add(service.service);
     for (MappingModel mapping : service.mappings.values()) {
@@ -1171,6 +1185,10 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
       this.packageName = packageName;
       this.generatedClassName = generatedClassName;
       this.operations = operations;
+    }
+
+    private String qualifiedGeneratedName() {
+      return packageName.isEmpty() ? generatedClassName : packageName + "." + generatedClassName;
     }
   }
 }

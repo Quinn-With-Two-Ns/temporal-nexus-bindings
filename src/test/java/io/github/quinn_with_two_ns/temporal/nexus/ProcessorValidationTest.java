@@ -158,6 +158,49 @@ public class ProcessorValidationTest {
   }
 
   @Test
+  public void rejectsGeneratedClassNameCollisions() throws IOException {
+    Compilation compilation =
+        compile(
+            "GeneratedNameCollision",
+            source(
+                "  static class First {\n"
+                    + "    @Service interface DeploymentService {\n"
+                    + "      @Operation String start(String input);\n"
+                    + "    }\n"
+                    + "  }\n"
+                    + "  static class Second {\n"
+                    + "    @Service interface DeploymentService {\n"
+                    + "      @Operation String cancel(String input);\n"
+                    + "    }\n"
+                    + "  }\n"
+                    + "  @WorkflowInterface interface StartWorkflow {\n"
+                    + "    @WorkflowMethod String start(String input);\n"
+                    + "  }\n"
+                    + "  @WorkflowInterface interface CancelWorkflow {\n"
+                    + "    @WorkflowMethod String cancel(String input);\n"
+                    + "  }\n"
+                    + "  static class StartWorkflowImpl implements StartWorkflow {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = First.DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public String start(String input) { return input; }\n"
+                    + "  }\n"
+                    + "  static class CancelWorkflowImpl implements CancelWorkflow {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = Second.DeploymentService.class,"
+                    + " name = \"cancel\", workflowId = \"#{input}\")\n"
+                    + "    public String cancel(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "Generated class test.DeploymentServiceNexusBindings for"
+            + " test.TestSource.Second.DeploymentService collides with the binding generated for"
+            + " test.TestSource.First.DeploymentService;"
+            + " rename one service or move it to another package");
+  }
+
+  @Test
   public void rejectsUpdateMappingsUntilAsyncSupportExists() throws IOException {
     Compilation compilation =
         compile(
