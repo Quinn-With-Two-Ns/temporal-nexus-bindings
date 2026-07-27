@@ -11,6 +11,7 @@ This project is independent of Temporal Technologies and is not an official Temp
 - Temporal Java SDK 1.37.0 or a compatible newer version.
 - A typed Nexus `@Service` interface.
 - All mappings for one service must be compiled together.
+- Kotlin sources additionally require kapt. See [Kotlin](#kotlin).
 
 ## Gradle
 
@@ -23,7 +24,7 @@ dependencies {
 }
 ```
 
-Kotlin DSL:
+Gradle Kotlin DSL:
 
 ```kotlin
 dependencies {
@@ -31,6 +32,9 @@ dependencies {
     annotationProcessor("io.github.quinn-with-two-ns:temporal-nexus-bindings:0.1.0")
 }
 ```
+
+Both declarations configure the Java annotation processor, which only sees Java sources. Projects
+whose annotated classes are written in Kotlin need kapt instead; see [Kotlin](#kotlin).
 
 The library declares its compatible Temporal SDK version transitively. An application's direct
 Temporal SDK dependency can select a newer compatible version.
@@ -317,10 +321,154 @@ container types, and argument conversions are checked during compilation. Data-d
 such as missing map keys, out-of-range indexes, null traversal, invalid IDs, and failed dynamic
 value conversion become non-retryable Nexus `BAD_REQUEST` errors.
 
+## Kotlin
+
+### Build setup
+
+This is a `javax.annotation.processing.Processor`, so Gradle's `annotationProcessor` configuration
+only applies it to Java sources. A Kotlin class carrying `@ServiceMapping` or an operation
+annotation is invisible to it, no binding is generated, and nothing reports a problem until the
+missing generated class surfaces as an unresolved reference at the call site. Kotlin projects must
+enable kapt:
+
+```kotlin
+plugins {
+    kotlin("jvm")
+    kotlin("kapt")
+}
+
+dependencies {
+    implementation("io.github.quinn-with-two-ns:temporal-nexus-bindings:0.1.0")
+    kapt("io.github.quinn-with-two-ns:temporal-nexus-bindings:0.1.0")
+}
+
+kapt {
+    correctErrorTypes = true
+}
+```
+
+`correctErrorTypes` matters here because mappings are validated against resolved types. Without it,
+a type kapt cannot resolve while generating stubs becomes `NonExistentClass`, and the resulting
+diagnostics describe a type the source never mentions.
+
+Maven users configure the `kapt` goal of `kotlin-maven-plugin` rather than the
+`maven-compiler-plugin` `annotationProcessorPaths` shown above.
+
+KSP cannot run this processor; see [Boundaries](#boundaries).
+
+### Payload conversion
+
+Temporal's default Jackson payload converter cannot construct a Kotlin `data class`, which has no
+no-argument constructor. Where construction does succeed it will also write `null` into a
+non-nullable property, failing later inside a generated null check rather than at the conversion.
+Add the `io.temporal:temporal-kotlin` artifact and register a data converter built from it:
+
+```kotlin
+val dataConverter = DefaultDataConverter.STANDARD_INSTANCE.withPayloadConverterOverrides(
+    JacksonJsonPayloadConverter(KotlinObjectMapperFactory.new()),
+)
+
+val client = WorkflowClient.newInstance(
+    service,
+    WorkflowClientOptions.newBuilder().setDataConverter(dataConverter).build(),
+)
+```
+
+This applies to the Nexus operation input and output types as well as workflow arguments and
+results.
+
+### Annotation syntax
+
+The mapping in [Usage](#usage) written in Kotlin:
+
+```kotlin
+data class StartDeploymentInput(val id: String, val artifact: String)
+
+data class CancelDeploymentInput(val id: String, val reason: String)
+
+data class DeploymentResult(val id: String, val status: String)
+
+@Service
+interface DeploymentService {
+    @Operation
+    fun start(input: StartDeploymentInput): DeploymentResult
+
+    @Operation
+    fun cancel(input: CancelDeploymentInput)
+}
+
+@WorkflowInterface
+interface DeploymentWorkflow {
+    @WorkflowMethod
+    fun deploy(input: StartDeploymentInput): DeploymentResult
+
+    @SignalMethod
+    fun cancel(reason: String)
+}
+
+@ServiceMapping(DeploymentService::class)
+class DeploymentWorkflowImpl : DeploymentWorkflow {
+    @WorkflowOperation(
+        name = "start",
+        workflowId = "deployment-#{id}",
+        options = WorkflowStartOptions(taskQueue = "deployment-workers"),
+    )
+    override fun deploy(input: StartDeploymentInput): DeploymentResult {
+        throw UnsupportedOperationException("Example only")
+    }
+
+    @SignalOperation(
+        name = "cancel",
+        workflowId = "deployment-#{id}",
+        arguments = ["#{reason}"],
+    )
+    override fun cancel(reason: String) {
+        // Signal implementation.
+    }
+}
+```
+
+Four syntactic differences are worth noting: a service is selected with `DeploymentService::class`,
+a nested annotation is written without `@` as `WorkflowStartOptions(...)`, `arguments` takes a
+Kotlin array literal, and expressions need no escaping because `#{...}` does not collide with
+Kotlin's `$` string templates.
+
+### Model types
+
+Ordinary `val` and `var` properties are read through the `getX()` accessors Kotlin generates, so
+`data class` inputs work with the expression language as written. Three Kotlin accessor-naming
+rules are exceptions:
+
+- A property whose name begins with `is` compiles to an accessor of the same name, so `val isActive`
+  becomes `isActive()` rather than `getIsActive()`. Because expressions resolve `#{name}` by trying
+  `getName()` and then `isName()`, such a property is addressed as `#{active}`, not `#{isActive}`.
+- Properties declared in or typed as a `@JvmInline value class` are unreadable. Kotlin mangles the
+  JVM name of any accessor whose signature mentions a value class.
+- `internal` properties are unreadable. Kotlin appends a module-name suffix to their accessors.
+
+A property annotated `@JvmField` is exposed as a public field and resolves through the field path.
+
+### Unsupported constructs
+
+- `suspend` handler methods. The compiler adds a hidden `Continuation` parameter, which is currently
+  reported as an argument-count mismatch.
+- Default arguments and `@JvmOverloads` on a mapped method. Kotlin copies the annotation onto each
+  synthetic overload, which the processor reports as a duplicate mapping. On a Nexus service
+  interface it is rejected as an overloaded operation method.
+- Mixing Kotlin and Java across one mapping can fail on declaration-site variance. A Kotlin
+  `List<String>` parameter compiles to `List<? extends String>`, so a Kotlin service interface
+  paired with a Java handler can be rejected for types that look identical in source. Annotate the
+  parameter `@JvmSuppressWildcards` to align the signatures.
+
+No Kotlin path is covered by this project's tests yet. Please report anything here that does not
+behave as documented.
+
 ## Boundaries
 
 - All mappings for one typed service must be visible to one annotation-processing compilation.
 - Cross-JAR mapping aggregation is intentionally unsupported.
+- KSP is unsupported. It does not run `javax.annotation.processing` processors, so Kotlin projects
+  must enable kapt even when they otherwise use KSP.
 - Referenced workflow implementations must be registered on a worker polling the selected task
   queue.
 - Activity and update operations are not implemented.
