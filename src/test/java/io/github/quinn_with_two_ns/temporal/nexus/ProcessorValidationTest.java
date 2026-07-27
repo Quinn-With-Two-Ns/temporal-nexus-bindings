@@ -240,6 +240,59 @@ public class ProcessorValidationTest {
   }
 
   @Test
+  public void validatesRecordComponentExpressions() throws IOException {
+    Compilation compilation =
+        compile(
+            "RecordComponents",
+            source(
+                "  record Nested(String region) {}\n"
+                    + "  record DeployInput(String id, Nested nested, int attempts) {}\n"
+                    + "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(DeployInput input);\n"
+                    + "  }\n"
+                    + workflowInterface(
+                        "@WorkflowMethod String run(String id, String region, int attempts);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"deployment-#{id}\","
+                    + " arguments = {\"#{id}\", \"#{nested.region}\", \"#{attempts}\"})\n"
+                    + "    public String run(String id, String region, int attempts) {\n"
+                    + "      return id;\n"
+                    + "    }\n"
+                    + "  }\n"),
+            "17");
+
+    assertTrue(compilation.messages, compilation.success);
+  }
+
+  @Test
+  public void rejectsNonComponentAccessorsOnRecords() throws IOException {
+    Compilation compilation =
+        compile(
+            "RecordNonComponentAccessor",
+            source(
+                "  record DeployInput(String id) {\n"
+                    + "    public String derived() { return id + \"!\"; }\n"
+                    + "  }\n"
+                    + "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(DeployInput input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String value);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{id}\","
+                    + " arguments = \"#{derived}\")\n"
+                    + "    public String run(String value) { return value; }\n"
+                    + "  }\n"),
+            "17");
+
+    assertFailureContains(
+        compilation, "Invalid arguments[0] expression: property \"derived\" does not exist");
+  }
+
+  @Test
   public void validatesNexusRequestMetadataExpressions() throws IOException {
     Compilation compilation =
         compile(

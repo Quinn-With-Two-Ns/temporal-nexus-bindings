@@ -310,11 +310,16 @@ annotations, but the processor rejects those mappings before using any of their 
 The annotations use a deliberately small, input-only SpEL-like language:
 
 - `#{input}` and `#{payload}` select the complete typed Nexus input.
-- `#{property}` and `#{nested.property}` read JavaBean getters or public fields.
+- `#{property}` and `#{nested.property}` read JavaBean getters, public fields, or Java record
+  components.
 - `#{['key']}` reads a map key.
 - `#{items[0]}` reads a non-negative index from a `List` or array.
 - String, boolean, numeric, and `null` literals are supported inside `#{...}`.
 - Literal text can surround expressions, such as `deployment-#{id}`.
+
+Property reads resolve a `getX()` getter, then an `isX()` getter, then a record component accessor
+`x()`, and finally a public field. Record accessors are matched only for genuine record components,
+so an ordinary public zero-argument method on a record is not exposed as a readable property.
 
 Expressions cannot call methods or access class metadata. Syntax, statically known properties,
 container types, and argument conversions are checked during compilation. Data-dependent failures

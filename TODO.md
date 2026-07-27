@@ -178,13 +178,14 @@ Java one.
 
 ## P2 — Better model-type support
 
-- [ ] Support expression traversal through Java record components.
+- [x] Support expression traversal through Java record components.
   - Spring SpEL reads a property by trying `getX()`, `isX()`, and then a record-style plain
     zero-argument accessor such as `x()`.
-  - The current bounded expression implementation only supports `getX()`, `isX()`, and public
-    fields at compile time and runtime.
-  - Detect genuine record components explicitly so record support does not accidentally expose
-    every public zero-argument method.
+  - The bounded expression implementation now resolves `getX()`, `isX()`, a record component
+    accessor `x()`, and public fields at compile time and runtime.
+  - Genuine record components are detected explicitly (record type plus a matching implicit
+    instance field) so record support does not accidentally expose every public zero-argument
+    method.
 - [ ] Finish Kotlin accessor support.
   - Ordinary `val` and `var` properties already resolve through the generated `getX()` accessors,
     so `data class` inputs work; the gaps are Kotlin's accessor-naming rules.
