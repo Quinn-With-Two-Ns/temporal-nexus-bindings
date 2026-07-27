@@ -900,11 +900,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   }
 
   private String classLiteral(TypeMirror type) {
-    TypeMirror boxed = boxed(type);
-    if (boxed.getKind() == TypeKind.ARRAY) {
-      return boxed.toString() + ".class";
-    }
-    return types.erasure(boxed).toString() + ".class";
+    return types.erasure(boxed(type)).toString() + ".class";
   }
 
   private String factoryMethod(HandlerKind kind) {

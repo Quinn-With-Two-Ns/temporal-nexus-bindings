@@ -203,7 +203,7 @@ public class ProcessorValidationTest {
   @Test
   public void validatesNestedBeanMapListAndArrayExpressions() throws IOException {
     Compilation compilation =
-        compile(
+        compileFully(
             "TypedExpressions",
             source(
                 "  static class Base<T> {\n"
@@ -290,6 +290,30 @@ public class ProcessorValidationTest {
 
     assertFailureContains(
         compilation, "Invalid arguments[0] expression: property \"derived\" does not exist");
+  }
+
+  @Test
+  public void generatedBindingsCompileForGenericArrayParameters() throws IOException {
+    Compilation compilation =
+        compileFully(
+            "GenericArrayParameter",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(java.util.List<String>[] input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(java.util.List<String>[] v);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"generic-array\")\n"
+                    + "    public String run(java.util.List<String>[] v) { return \"x\"; }\n"
+                    + "  }\n"));
+
+    assertTrue(compilation.messages, compilation.success);
+    String generatedSource =
+        compilation.generatedSources.get("test/DeploymentServiceNexusBindings.java");
+    assertNotNull(compilation.generatedSources.toString(), generatedSource);
+    assertTrue(generatedSource, generatedSource.contains("java.util.List[].class"));
   }
 
   @Test
@@ -785,11 +809,20 @@ public class ProcessorValidationTest {
   }
 
   private static Compilation compile(String name, String source) throws IOException {
-    return compile(name, source, "8");
+    return compile(name, source, "8", true);
   }
 
   private static Compilation compile(String name, String source, String sourceVersion)
       throws IOException {
+    return compile(name, source, sourceVersion, true);
+  }
+
+  private static Compilation compileFully(String name, String source) throws IOException {
+    return compile(name, source, "8", false);
+  }
+
+  private static Compilation compile(
+      String name, String source, String sourceVersion, boolean processingOnly) throws IOException {
     JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
     assertNotNull("Tests require a JDK", compiler);
     Path root = Files.createTempDirectory("nexus-annotation-processor-" + name);
@@ -804,7 +837,8 @@ public class ProcessorValidationTest {
           compiler.getStandardFileManager(diagnostics, Locale.ROOT, UTF_8)) {
         Iterable<? extends JavaFileObject> units =
             fileManager.getJavaFileObjectsFromFiles(Collections.singletonList(sourceFile.toFile()));
-        List<String> options =
+        List<String> options = new ArrayList<>();
+        options.addAll(
             Arrays.asList(
                 "-classpath",
                 System.getProperty("java.class.path"),
@@ -813,8 +847,10 @@ public class ProcessorValidationTest {
                 "-s",
                 generated.toString(),
                 "--release",
-                sourceVersion,
-                "-proc:only");
+                sourceVersion));
+        if (processingOnly) {
+          options.add("-proc:only");
+        }
         JavaCompiler.CompilationTask task =
             compiler.getTask(null, fileManager, diagnostics, options, null, units);
         task.setProcessors(Collections.singletonList(new NexusAnnotatedHandlerProcessor()));
