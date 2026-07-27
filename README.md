@@ -450,8 +450,8 @@ A property annotated `@JvmField` is exposed as a public field and resolves throu
 
 ### Unsupported constructs
 
-- `suspend` handler methods. The compiler adds a hidden `Continuation` parameter, which is reported
-  as an argument-count mismatch naming a parameter that does not appear in the source.
+- `suspend` handler methods. The compiler adds a hidden `Continuation` parameter, which is currently
+  reported as an argument-count mismatch.
 - Default arguments and `@JvmOverloads` on a mapped method. Kotlin copies the annotation onto each
   synthetic overload, which the processor reports as a duplicate mapping. On a Nexus service
   interface it is rejected as an overloaded operation method.

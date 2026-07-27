@@ -166,7 +166,7 @@ Java one.
   - Cover expression traversal over `data class` inputs, including the `is`-prefixed accessor rule.
 - [ ] Report actionable diagnostics for Kotlin constructs that cannot be mapped.
   - `suspend` handler methods, whose hidden `Continuation` parameter is currently reported as an
-    argument-count mismatch naming a parameter absent from the source.
+    argument-count mismatch.
   - Default arguments and `@JvmOverloads` on mapped methods, which copy the annotation onto
     synthetic overloads and surface as a duplicate mapping.
 - [ ] Decide how to handle Kotlin declaration-site variance.
