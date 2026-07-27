@@ -152,6 +152,30 @@ implementation cost.
 - [ ] Cache resolved property accessors or generate typed extractors to reduce per-call reflection.
 - [ ] Keep method invocation, class metadata access, and general-purpose SpEL out of scope.
 
+## P2 — Kotlin support
+
+Kotlin sources are reachable only through kapt, and the README now documents the required setup,
+payload conversion, and known limitations. The remaining work is bringing the experience up to the
+Java one.
+
+- [ ] Add a kapt fixture to CI.
+  - No Kotlin path is exercised by any test today, so every documented Kotlin behavior is reasoned
+    about rather than verified.
+  - Cover a Kotlin typed service, a Kotlin workflow implementation, and a mixed Kotlin/Java mapping.
+  - Confirm generated Java bindings resolve from Kotlin call sites in the same module.
+  - Cover expression traversal over `data class` inputs, including the `is`-prefixed accessor rule.
+- [ ] Report actionable diagnostics for Kotlin constructs that cannot be mapped.
+  - `suspend` handler methods, whose hidden `Continuation` parameter is currently reported as an
+    argument-count mismatch naming a parameter absent from the source.
+  - Default arguments and `@JvmOverloads` on mapped methods, which copy the annotation onto
+    synthetic overloads and surface as a duplicate mapping.
+- [ ] Decide how to handle Kotlin declaration-site variance.
+  - A Kotlin `List<String>` parameter compiles to `List<? extends String>`, so a Kotlin service
+    interface paired with a Java handler can fail the strict return-type and direct-input checks on
+    types that are identical in source.
+  - Either keep `@JvmSuppressWildcards` as the documented workaround or compare erasure plus
+    assignability instead of requiring an exact type match.
+
 ## P2 — Better model-type support
 
 - [ ] Support expression traversal through Java record components.
@@ -161,7 +185,15 @@ implementation cost.
     fields at compile time and runtime.
   - Detect genuine record components explicitly so record support does not accidentally expose
     every public zero-argument method.
-- [ ] Support Kotlin data classes when processing through KAPT.
+- [ ] Finish Kotlin accessor support.
+  - Ordinary `val` and `var` properties already resolve through the generated `getX()` accessors,
+    so `data class` inputs work; the gaps are Kotlin's accessor-naming rules.
+  - Resolve `is`-prefixed properties by their declared name. Kotlin compiles `val isActive` to
+    `isActive()`, so the property is currently reachable only as `#{active}`.
+  - Decide whether to support `@JvmInline value class` properties, whose accessors carry mangled
+    JVM names.
+  - Reject `internal` properties, whose accessors carry a module-name suffix, with a message that
+    names the cause instead of reporting that the property does not exist.
 - [ ] Support Protobuf-generated message accessors.
 - [ ] Recognize boolean `isX` and fluent zero-argument accessors such as `customerId()`.
   - Treat general fluent accessors as a separate design decision from record components because
@@ -185,6 +217,37 @@ implementation cost.
 - [ ] Keep generated output deterministic regardless of source discovery order.
 - [ ] Add tests where another processor generates a mapped type in a later round.
 - [ ] Verify incremental rebuilds after adding, changing, and removing a mapping.
+
+## P3 — KSP support
+
+kapt is in maintenance mode, so Kotlin-only projects will increasingly enable KSP alone. KSP does
+not run `javax.annotation.processing` processors and no adapter exists, so support means a second
+front end rather than a shim. Treat the artifact split as a prerequisite that is worth doing on its
+own schedule, and the second front end as a decision gated on demand.
+
+- [ ] Split the published artifact before adding a second front end.
+  - `temporal-nexus-bindings` keeps the annotations, runtime handlers, and shared expression parser.
+  - `temporal-nexus-bindings-apt` carries the javac processor that ships today, so only the
+    processor coordinate changes for existing consumers.
+  - Promote `ExpressionModel` from package-private to a shared internal API so both front ends parse
+    expressions identically instead of duplicating the grammar.
+  - Rework the publishing workflow, which hardcodes a single artifact name in its digest capture and
+    bundle validation.
+- [ ] Decide whether a KSP front end is worth its duplication cost.
+  - `ExpressionTypeValidator` and `NexusAnnotatedHandlerProcessor` are bound to `javax.lang.model`
+    throughout and have no reuse path; the validation rules would exist twice and must not drift.
+  - A separate artifact keeps `kotlin-stdlib` and `symbol-processing-api` off every Java consumer's
+    processor path and avoids adding a Kotlin version axis to the Temporal compatibility matrix.
+  - Until this ships, kapt keeps Kotlin unblocked, so weigh it against the P1 correctness work.
+- [ ] If implemented, keep the two front ends interchangeable.
+  - Reuse the shared expression parser and mirror the generated `create()` and `register(...)`
+    shapes exactly so consumers can switch without source changes.
+  - Run the same mapping-validation cases against both front ends.
+- [ ] If implemented, take the Kotlin fidelity KSP makes available.
+  - `KSFunctionDeclaration.findOverridee()` replaces the manual walk up the Temporal handler
+    interfaces.
+  - Kotlin property, value-class, and `internal` naming are visible directly rather than through
+    kapt's Java projection, which removes several documented limitations.
 
 ## P3 — Cross-module service composition
 
