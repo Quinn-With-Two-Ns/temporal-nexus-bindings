@@ -3,6 +3,7 @@ package io.github.quinn_with_two_ns.temporal.nexus.internal;
 import java.lang.reflect.Array;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
 import java.util.Collections;
 import java.util.List;
@@ -193,6 +194,9 @@ final class InputExpression {
     if (method == null) {
       method = findMethod(type, "is" + suffix);
     }
+    if (method == null) {
+      method = recordAccessor(type, property);
+    }
     if (method != null) {
       try {
         return method.invoke(value);
@@ -218,5 +222,35 @@ final class InputExpression {
     } catch (NoSuchMethodException e) {
       return null;
     }
+  }
+
+  /**
+   * Returns the same-named accessor when {@code property} is a genuine record component, or {@code
+   * null} otherwise. Detection is restricted to record types and to a component's implicit instance
+   * field so an ordinary public zero-argument method on a record is not exposed as a property.
+   */
+  private static @Nullable Method recordAccessor(Class<?> type, String property) {
+    if (!isRecord(type) || !hasInstanceField(type, property)) {
+      return null;
+    }
+    return findMethod(type, property);
+  }
+
+  private static boolean isRecord(Class<?> type) {
+    // Class.isRecord() is Java 16+; a record's direct superclass is always java.lang.Record, which
+    // lets this detection compile for release 8 while still recognizing records at runtime.
+    Class<?> superclass = type.getSuperclass();
+    return superclass != null && "java.lang.Record".equals(superclass.getName());
+  }
+
+  private static boolean hasInstanceField(Class<?> type, String property) {
+    // A record cannot declare instance fields beyond its components, so a matching non-static field
+    // proves the property is a genuine component rather than a derived accessor.
+    for (Field field : type.getDeclaredFields()) {
+      if (field.getName().equals(property) && !Modifier.isStatic(field.getModifiers())) {
+        return true;
+      }
+    }
+    return false;
   }
 }

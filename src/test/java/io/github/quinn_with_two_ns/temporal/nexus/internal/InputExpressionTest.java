@@ -4,11 +4,25 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.fail;
 
+import java.net.URL;
+import java.net.URLClassLoader;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import javax.tools.DiagnosticCollector;
+import javax.tools.JavaCompiler;
+import javax.tools.JavaFileObject;
+import javax.tools.StandardJavaFileManager;
+import javax.tools.ToolProvider;
 import org.jspecify.annotations.Nullable;
 import org.junit.Test;
 
@@ -43,6 +57,24 @@ public class InputExpressionTest {
         "deployment-7", InputExpression.compile("#{input.id}").evaluate(input, String.class));
     assertEquals(
         "deployment-7", InputExpression.compile("#{payload.id}").evaluate(input, String.class));
+  }
+
+  @Test
+  public void evaluatesRecordComponents() throws Exception {
+    // Records require Java 16+, which the release-8 test source set cannot express directly, so the
+    // fixture is compiled and loaded at runtime to exercise genuine record-component reflection.
+    Object input = compileRecordInput();
+
+    assertEquals("deployment-7", InputExpression.compile("#{id}").evaluate(input, String.class));
+    assertEquals("west", InputExpression.compile("#{nested.region}").evaluate(input, String.class));
+    assertEquals(
+        "production",
+        InputExpression.compile("#{metadata['environment']}").evaluate(input, String.class));
+    assertEquals(
+        "deployment-deployment-7-west",
+        InputExpression.compile("deployment-#{id}-#{nested.region}").evaluate(input, String.class));
+    assertEvaluationFailure(
+        InputExpression.compile("#{derived}"), input, String.class, "does not exist");
   }
 
   @Test
@@ -130,6 +162,53 @@ public class InputExpressionTest {
         "requires a List or array");
     assertEvaluationFailure(
         InputExpression.compile("#{id}"), input, Integer.class, "cannot be converted");
+  }
+
+  private static Object compileRecordInput() throws Exception {
+    JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
+    if (compiler == null) {
+      throw new IllegalStateException("Tests require a JDK");
+    }
+    Path root = Files.createTempDirectory("nexus-record-fixture");
+    try {
+      String recordSource =
+          "package recordfixture;\n"
+              + "public record RecordInput(String id, Nested nested,"
+              + " java.util.Map<String, String> metadata) {\n"
+              + "  public record Nested(String region) {}\n"
+              + "  public String derived() { return id + \"!\"; }\n"
+              + "}\n";
+      Path sourceFile = root.resolve("recordfixture/RecordInput.java");
+      Files.createDirectories(sourceFile.getParent());
+      Files.write(sourceFile, recordSource.getBytes(StandardCharsets.UTF_8));
+      Path classes = Files.createDirectories(root.resolve("classes"));
+      DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
+      try (StandardJavaFileManager fileManager =
+          compiler.getStandardFileManager(diagnostics, Locale.ROOT, StandardCharsets.UTF_8)) {
+        Iterable<? extends JavaFileObject> units =
+            fileManager.getJavaFileObjectsFromFiles(Collections.singletonList(sourceFile.toFile()));
+        List<String> options = Arrays.asList("-d", classes.toString(), "--release", "17");
+        if (!compiler.getTask(null, fileManager, diagnostics, options, null, units).call()) {
+          fail(diagnostics.getDiagnostics().toString());
+        }
+      }
+      URLClassLoader loader =
+          new URLClassLoader(
+              new URL[] {classes.toUri().toURL()}, InputExpressionTest.class.getClassLoader());
+      Class<?> nestedClass = Class.forName("recordfixture.RecordInput$Nested", true, loader);
+      Class<?> inputClass = Class.forName("recordfixture.RecordInput", true, loader);
+      Object nested = nestedClass.getConstructor(String.class).newInstance("west");
+      return inputClass
+          .getConstructor(String.class, nestedClass, Map.class)
+          .newInstance(
+              "deployment-7", nested, Collections.singletonMap("environment", "production"));
+    } finally {
+      try (Stream<Path> paths = Files.walk(root)) {
+        for (Path path : paths.sorted(Comparator.reverseOrder()).collect(Collectors.toList())) {
+          Files.deleteIfExists(path);
+        }
+      }
+    }
   }
 
   private static void assertCompileFailure(String source, String expected) {

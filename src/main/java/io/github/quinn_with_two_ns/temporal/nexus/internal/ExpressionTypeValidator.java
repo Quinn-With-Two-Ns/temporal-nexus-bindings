@@ -109,6 +109,9 @@ final class ExpressionTypeValidator {
     if (getter == null) {
       getter = methodReturnType(declaredOwner, owner, "is" + suffix);
     }
+    if (getter == null) {
+      getter = recordComponentReturnType(declaredOwner, owner, property);
+    }
     if (getter != null) {
       return known(getter.getKind() == TypeKind.VOID ? types.getNullType() : getter);
     }
@@ -132,6 +135,38 @@ final class ExpressionTypeValidator {
       }
     }
     return null;
+  }
+
+  /**
+   * Returns the accessor return type when {@code property} is a genuine record component of {@code
+   * owner}, or {@code null} otherwise. Detection is intentionally restricted to record types and to
+   * a component's implicit same-named instance field, so an ordinary public zero-argument method on
+   * a record is not exposed as a readable property.
+   */
+  private @Nullable TypeMirror recordComponentReturnType(
+      DeclaredType declaredOwner, TypeElement owner, String property) {
+    if (!isRecord(owner) || !hasInstanceField(owner, property)) {
+      return null;
+    }
+    return methodReturnType(declaredOwner, owner, property);
+  }
+
+  private static boolean isRecord(TypeElement type) {
+    // ElementKind.RECORD is Java 16+; compare by name so the processor still compiles for release
+    // 8.
+    return type.getKind().name().equals("RECORD");
+  }
+
+  private boolean hasInstanceField(TypeElement owner, String property) {
+    // A record cannot declare instance fields beyond its components, so a matching non-static field
+    // proves the property is a genuine component rather than a derived accessor.
+    for (VariableElement field : ElementFilter.fieldsIn(elements.getAllMembers(owner))) {
+      if (field.getSimpleName().contentEquals(property)
+          && !field.getModifiers().contains(Modifier.STATIC)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private InferredType mapValue(TypeMirror ownerType) {
