@@ -3,8 +3,10 @@ package io.github.quinn_with_two_ns.temporal.nexus.internal;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import io.github.quinn_with_two_ns.temporal.nexus.NonPublicPropertyFixture;
 import java.math.BigDecimal;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -170,6 +172,31 @@ public class InputExpressionTest {
         input,
         String.class,
         "map key access requires a Map");
+  }
+
+  @Test
+  public void readsPropertiesDeclaredOnNonPublicClasses() {
+    assertEquals(
+        "hidden",
+        InputExpression.compile("#{name}")
+            .evaluate(NonPublicPropertyFixture.hidden(), String.class));
+  }
+
+  @Test
+  public void reportsThrowingGettersAsHandlerSideFailures() {
+    try {
+      InputExpression.compile("#{boom}").evaluate(new Exploding(), String.class);
+      fail("Expected evaluation to fail");
+    } catch (IllegalStateException e) {
+      String message = String.valueOf(e.getMessage());
+      assertTrue(message, message.contains("failed reading property \"boom\""));
+    }
+  }
+
+  public static final class Exploding {
+    public String getBoom() {
+      throw new RuntimeException("boom");
+    }
   }
 
   @Test
