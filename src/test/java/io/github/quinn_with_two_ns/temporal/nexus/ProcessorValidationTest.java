@@ -736,6 +736,54 @@ public class ProcessorValidationTest {
   }
 
   @Test
+  public void rejectsOutOfRangeNumericLiterals() throws IOException {
+    Compilation compilation =
+        compile(
+            "OutOfRangeNumericLiteral",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(int value);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\","
+                    + " arguments = \"#{9999999999}\")\n"
+                    + "    public String run(int value) { return String.valueOf(value); }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "Invalid arguments[0] expression: expression \"#{9999999999}\" cannot be converted"
+            + " losslessly to java.lang.Integer");
+  }
+
+  @Test
+  public void rejectsMultiCharacterConstantsForCharTargets() throws IOException {
+    Compilation compilation =
+        compile(
+            "MultiCharacterConstant",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(char value);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\","
+                    + " arguments = \"#{'ab'}\")\n"
+                    + "    public String run(char value) { return String.valueOf(value); }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "Invalid arguments[0] expression: expression \"#{'ab'}\" produced java.lang.String,"
+            + " which cannot be converted to java.lang.Character");
+  }
+
+  @Test
   public void rejectsContainerAccessOnWrongType() throws IOException {
     Compilation compilation =
         compile(
