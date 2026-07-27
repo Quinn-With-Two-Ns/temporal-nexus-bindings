@@ -192,16 +192,17 @@ public class InputExpressionTest {
           fail(diagnostics.getDiagnostics().toString());
         }
       }
-      URLClassLoader loader =
+      try (URLClassLoader loader =
           new URLClassLoader(
-              new URL[] {classes.toUri().toURL()}, InputExpressionTest.class.getClassLoader());
-      Class<?> nestedClass = Class.forName("recordfixture.RecordInput$Nested", true, loader);
-      Class<?> inputClass = Class.forName("recordfixture.RecordInput", true, loader);
-      Object nested = nestedClass.getConstructor(String.class).newInstance("west");
-      return inputClass
-          .getConstructor(String.class, nestedClass, Map.class)
-          .newInstance(
-              "deployment-7", nested, Collections.singletonMap("environment", "production"));
+              new URL[] {classes.toUri().toURL()}, InputExpressionTest.class.getClassLoader())) {
+        Class<?> nestedClass = Class.forName("recordfixture.RecordInput$Nested", true, loader);
+        Class<?> inputClass = Class.forName("recordfixture.RecordInput", true, loader);
+        Object nested = nestedClass.getConstructor(String.class).newInstance("west");
+        return inputClass
+            .getConstructor(String.class, nestedClass, Map.class)
+            .newInstance(
+                "deployment-7", nested, Collections.singletonMap("environment", "production"));
+      }
     } finally {
       try (Stream<Path> paths = Files.walk(root)) {
         for (Path path : paths.sorted(Comparator.reverseOrder()).collect(Collectors.toList())) {
