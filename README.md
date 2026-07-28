@@ -235,13 +235,13 @@ separately.
 - `@WorkflowOperation` starts a workflow asynchronously.
 - `@SignalOperation` signals an existing workflow synchronously.
 - `@QueryOperation` queries an existing workflow synchronously.
-
-Signal and query operations addressing a workflow ID with no known execution fail the Nexus call
-as a non-retryable not-found error.
 - `@ActivityOperation` deliberately fails compilation while this library targets Temporal Java
   SDK 1.37.0, which does not expose the Nexus activity bridge needed for asynchronous completion.
 - `@UpdateOperation` deliberately fails compilation until asynchronous update support
   is implemented.
+
+Signal and query operations addressing a workflow ID with no known execution fail the Nexus call
+as a non-retryable not-found error.
 
 Workflow starts use the Nexus worker's task queue by default. Set
 `options = @WorkflowStartOptions(taskQueue = "...")` to route the workflow to another worker.
@@ -260,8 +260,18 @@ Expressions can also read Nexus request metadata:
 These roots are available in `workflowId`, `WorkflowStartOptions`, and `arguments`, including
 inside templates such as `deployment-#{nexus.requestId}`. A missing header fails the Nexus call as
 a bad request, just like other missing map keys. An expression that evaluates to null inside a
-template also fails the call as a bad request rather than silently producing a shorter string. The `nexus` identifier is reserved; address a
-payload property with that name explicitly as `#{payload.nexus}`.
+template also fails the call as a bad request rather than silently producing a shorter string. The
+`nexus` identifier is reserved; address a payload property with that name explicitly as
+`#{payload.nexus}`.
+
+Quoted string constants and quoted map keys accept `\\`, `\'`, and `\"` as escapes — for example
+`#{metadata['a\'b']}`. Any other backslash sequence fails compilation rather than silently dropping
+the backslash, so a literal Windows-style path must be written as `#{'C:\\path'}`.
+
+Reading a property is caller input, so a missing property, a missing map key, an out-of-range
+index, or a failed conversion fails the Nexus call as a non-retryable bad request. A property
+that exists but cannot be read — an inaccessible accessor, or a getter that throws — is a
+handler fault instead, and fails the call as a non-retryable internal error.
 
 Every operation in a referenced Nexus service must have exactly one annotated mapping. Missing,
 duplicate, incompatible, or malformed mappings fail compilation.

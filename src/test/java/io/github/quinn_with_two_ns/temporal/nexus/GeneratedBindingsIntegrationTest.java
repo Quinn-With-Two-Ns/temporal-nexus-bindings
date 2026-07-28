@@ -1,7 +1,9 @@
 package io.github.quinn_with_two_ns.temporal.nexus;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.nexusrpc.Operation;
 import io.nexusrpc.Service;
 import io.nexusrpc.handler.HandlerException;
@@ -48,7 +50,7 @@ public class GeneratedBindingsIntegrationTest {
 
     assertEquals("DeploymentService", service.getDefinition().getName());
     assertEquals(
-        Arrays.asList("cancel", "metadata", "start", "status"),
+        Arrays.asList("cancel", "metadata", "probe", "start", "status"),
         new ArrayList<>(new TreeSet<>(service.getOperationHandlers().keySet())));
   }
 
@@ -89,7 +91,7 @@ public class GeneratedBindingsIntegrationTest {
   }
 
   @Test
-  public void signalToMissingWorkflowFailsWithNotFound() {
+  public void signalAndQueryToMissingWorkflowFailWithNotFound() {
     try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
       Worker nexusWorker = environment.newWorker(NEXUS_TASK_QUEUE);
       nexusWorker.registerWorkflowImplementationTypes(MissingWorkflowCallerImpl.class);
@@ -97,29 +99,74 @@ public class GeneratedBindingsIntegrationTest {
       environment.createNexusEndpoint(ENDPOINT, NEXUS_TASK_QUEUE);
       environment.start();
 
-      MissingWorkflowCaller caller =
+      // The SDK already maps WorkflowNotFoundException to NOT_FOUND on its own, so asserting only
+      // on the error type would pass without the handlers' own catch. The operation-scoped message
+      // is what those catches actually add, so pin that instead.
+      assertStartsWith(
+          "NOT_FOUND:No workflow execution found for cancel: ",
+          callMissingWorkflow(environment, "cancel"));
+      assertStartsWith(
+          "NOT_FOUND:No workflow execution found for status: ",
+          callMissingWorkflow(environment, "status"));
+    }
+  }
+
+  private static String callMissingWorkflow(TestWorkflowEnvironment environment, String operation) {
+    return environment
+        .getWorkflowClient()
+        .newWorkflowStub(
+            MissingWorkflowCaller.class,
+            WorkflowOptions.newBuilder()
+                .setWorkflowId("missing-workflow-caller-" + operation)
+                .setTaskQueue(NEXUS_TASK_QUEUE)
+                .build())
+        .call(operation);
+  }
+
+  private static void assertStartsWith(String expectedPrefix, String actual) {
+    assertTrue(
+        "expected to start with \"" + expectedPrefix + "\" but was \"" + actual + "\"",
+        actual.startsWith(expectedPrefix));
+  }
+
+  @Test
+  public void unreadablePropertyFailsAsNonRetryableInternalError() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      Worker nexusWorker = environment.newWorker(NEXUS_TASK_QUEUE);
+      nexusWorker.registerWorkflowImplementationTypes(UnreadablePropertyCallerImpl.class);
+      DeploymentServiceNexusBindings.register(nexusWorker);
+      environment.createNexusEndpoint(ENDPOINT, NEXUS_TASK_QUEUE);
+      environment.start();
+
+      UnreadablePropertyCaller caller =
           environment
               .getWorkflowClient()
               .newWorkflowStub(
-                  MissingWorkflowCaller.class,
+                  UnreadablePropertyCaller.class,
                   WorkflowOptions.newBuilder()
-                      .setWorkflowId("missing-workflow-caller")
+                      .setWorkflowId("unreadable-property-caller")
                       .setTaskQueue(NEXUS_TASK_QUEUE)
                       .build());
 
-      assertEquals("NOT_FOUND", caller.call("no-such-workflow"));
+      // A getter that always throws is a handler fault, not caller input, so it must not surface as
+      // BAD_REQUEST. It is also deterministic, so it must be non-retryable — leaving retry behavior
+      // unspecified would retry the operation until schedule-to-close for no benefit.
+      assertStartsWith(
+          "INTERNAL:NON_RETRYABLE:Failed evaluating Nexus input for probe: "
+              + "failed reading property \"boom\"",
+          caller.call());
     }
   }
 
   @WorkflowInterface
-  public interface MissingWorkflowCaller {
+  public interface UnreadablePropertyCaller {
     @WorkflowMethod
-    String call(String workflowId);
+    String call();
   }
 
-  public static class MissingWorkflowCallerImpl implements MissingWorkflowCaller {
+  public static class UnreadablePropertyCallerImpl implements UnreadablePropertyCaller {
     @Override
-    public String call(String workflowId) {
+    public String call() {
       NexusServiceOptions serviceOptions =
           NexusServiceOptions.newBuilder()
               .setEndpoint(ENDPOINT)
@@ -131,12 +178,55 @@ public class GeneratedBindingsIntegrationTest {
       DeploymentService service =
           Workflow.newNexusServiceStub(DeploymentService.class, serviceOptions);
       try {
-        service.cancel(new CancelDeploymentInput(workflowId, "unused"));
+        service.probe(new ProbeInput("any-workflow"));
         return "unexpected-success";
       } catch (NexusOperationFailure e) {
         @Nullable Throwable cause = e.getCause();
         if (cause instanceof HandlerException) {
-          return ((HandlerException) cause).getErrorType().toString();
+          HandlerException handler = (HandlerException) cause;
+          return handler.getErrorType()
+              + ":"
+              + handler.getRetryBehavior()
+              + ":"
+              + handler.getMessage();
+        }
+        return "unexpected-cause: " + cause;
+      }
+    }
+  }
+
+  @WorkflowInterface
+  public interface MissingWorkflowCaller {
+    @WorkflowMethod
+    String call(String operation);
+  }
+
+  public static class MissingWorkflowCallerImpl implements MissingWorkflowCaller {
+    private static final String MISSING_WORKFLOW_ID = "no-such-workflow";
+
+    @Override
+    public String call(String operation) {
+      NexusServiceOptions serviceOptions =
+          NexusServiceOptions.newBuilder()
+              .setEndpoint(ENDPOINT)
+              .setOperationOptions(
+                  NexusOperationOptions.newBuilder()
+                      .setScheduleToCloseTimeout(Duration.ofSeconds(10))
+                      .build())
+              .build();
+      DeploymentService service =
+          Workflow.newNexusServiceStub(DeploymentService.class, serviceOptions);
+      try {
+        if ("cancel".equals(operation)) {
+          service.cancel(new CancelDeploymentInput(MISSING_WORKFLOW_ID, "unused"));
+        } else {
+          service.status(new GetDeploymentStatusInput(MISSING_WORKFLOW_ID));
+        }
+        return "unexpected-success";
+      } catch (NexusOperationFailure e) {
+        @Nullable Throwable cause = e.getCause();
+        if (cause instanceof HandlerException) {
+          return ((HandlerException) cause).getErrorType() + ":" + cause.getMessage();
         }
         return "unexpected-cause: " + cause;
       }
@@ -156,6 +246,9 @@ public class GeneratedBindingsIntegrationTest {
 
     @Operation
     String metadata(String input);
+
+    @Operation
+    void probe(ProbeInput input);
   }
 
   @WorkflowInterface
@@ -165,6 +258,9 @@ public class GeneratedBindingsIntegrationTest {
 
     @SignalMethod(name = "cancelDeployment")
     void cancel(String reason);
+
+    @SignalMethod(name = "probeDeployment")
+    void probe(String value);
 
     @QueryMethod(name = "deploymentStatus")
     List<String> status();
@@ -215,6 +311,10 @@ public class GeneratedBindingsIntegrationTest {
       this.reason = reason;
       this.cancelled = true;
     }
+
+    @Override
+    @SignalOperation(name = "probe", workflowId = "#{id}", arguments = "#{boom}")
+    public void probe(String value) {}
 
     @Override
     @QueryOperation(name = "status", workflowId = "#{id}")
@@ -372,6 +472,34 @@ public class GeneratedBindingsIntegrationTest {
 
     public void setReason(String reason) {
       this.reason = reason;
+    }
+  }
+
+  /**
+   * Payload whose {@code boom} property exists at compile time but always fails to read at runtime.
+   * {@code @JsonIgnore} keeps it off the wire so the getter only runs where the expression runtime
+   * invokes it: inside the handler.
+   */
+  public static final class ProbeInput {
+    private @Nullable String id;
+
+    public ProbeInput() {}
+
+    ProbeInput(String id) {
+      this.id = id;
+    }
+
+    public @Nullable String getId() {
+      return id;
+    }
+
+    public void setId(String id) {
+      this.id = id;
+    }
+
+    @JsonIgnore
+    public String getBoom() {
+      throw new IllegalStateException("boom");
     }
   }
 

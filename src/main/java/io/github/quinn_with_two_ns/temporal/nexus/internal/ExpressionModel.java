@@ -231,6 +231,16 @@ final class ExpressionModel {
         escaped = true;
         continue;
       }
+      if (escaped && current != '\\' && current != '\'' && current != '"') {
+        // Silently dropping the backslash would quietly change the meaning of literals such as
+        // 'C:\path'. Only the escapes the parser itself honors are accepted.
+        throw new IllegalArgumentException(
+            "unsupported escape \"\\"
+                + current
+                + "\" in "
+                + value
+                + "; only \\\\, \\' and \\\" are supported");
+      }
       escaped = false;
       result.append(current);
     }

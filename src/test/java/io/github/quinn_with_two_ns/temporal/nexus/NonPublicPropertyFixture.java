@@ -25,4 +25,21 @@ public final class NonPublicPropertyFixture {
       return "hidden";
     }
   }
+
+  /**
+   * Returns an instance of a public class whose only declaration of {@code getName} lives on a
+   * non-public superclass, so no public supertype offers an accessible equivalent.
+   */
+  public static Object inherited() {
+    return new PublicLeaf();
+  }
+
+  abstract static class HiddenBase {
+    public String getName() {
+      return "inherited";
+    }
+  }
+
+  /** A public class that inherits its getter from a non-public base and implements no interface. */
+  public static final class PublicLeaf extends HiddenBase {}
 }

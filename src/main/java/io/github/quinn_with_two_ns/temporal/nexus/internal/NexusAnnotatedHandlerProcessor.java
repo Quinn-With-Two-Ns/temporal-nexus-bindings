@@ -123,6 +123,8 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     for (ServiceModel service : services.values()) {
       valid &= validateCompleteService(service);
     }
+    // A HashMap is safe here despite the deterministic-output rule: it is only probed, never
+    // iterated. Diagnostic order comes from services.values(), which is a LinkedHashMap.
     Map<String, ServiceModel> generatedNames = new HashMap<>();
     for (ServiceModel service : services.values()) {
       @Nullable ServiceModel existing =
@@ -852,8 +854,11 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     }
     // Only explicit values are read. Defaults stored in the annotation class files may surface as
     // unresolved javac proxies whose AnnotationValue.getValue() throws, depending on class
-    // completion order. Every default in this API is empty, so absent values fall back to the same
-    // empty string, empty array, or null the extraction helpers already produce.
+    // completion order. Absent members therefore surface here as null, "", or an empty array, and
+    // every call site already treats that identically to the member's declared default — the
+    // void.class sentinel for `service`, and an all-empty @WorkflowStartOptions for `options`.
+    // Adding a member whose default is not equivalent to absent requires handling it explicitly at
+    // the call site; it would otherwise be silently dropped.
     for (Map.Entry<? extends ExecutableElement, ? extends AnnotationValue> entry :
         annotation.getElementValues().entrySet()) {
       result.put(entry.getKey().getSimpleName().toString(), entry.getValue());

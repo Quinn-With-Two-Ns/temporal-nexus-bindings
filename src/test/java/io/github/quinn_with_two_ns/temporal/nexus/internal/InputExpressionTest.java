@@ -234,6 +234,27 @@ public class InputExpressionTest {
   }
 
   @Test
+  public void rejectsUnsupportedEscapes() {
+    // Dropping the backslash would silently turn 'C:\path' into "C:path".
+    assertCompileFailure("#{'C:\\path'}", "unsupported escape \"\\p\"");
+    assertCompileFailure("#{'a\\nb'}", "unsupported escape \"\\n\"");
+    assertCompileFailure("#{metadata['a\\tb']}", "unsupported escape \"\\t\"");
+  }
+
+  /**
+   * A public class inheriting a getter from a non-public base needs no supertype walk: javac emits
+   * an accessible bridge on the public subclass, so the declaring class is already public. Pinned
+   * because the guarantee is user-visible even though the mechanism lives outside this code.
+   */
+  @Test
+  public void readsPropertyInheritedFromNonPublicSuperclass() {
+    assertEquals(
+        "inherited",
+        InputExpression.compile("#{name}")
+            .evaluate(NonPublicPropertyFixture.inherited(), String.class));
+  }
+
+  @Test
   public void reportsRuntimeTraversalAndConversionFailures() {
     Input input = new Input("deployment-7", null, "public-value");
     Input populatedInput = new Input("deployment-7", new Nested("west"), "public-value");

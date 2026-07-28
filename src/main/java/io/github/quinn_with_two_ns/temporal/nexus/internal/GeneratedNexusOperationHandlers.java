@@ -434,6 +434,8 @@ public final class GeneratedNexusOperationHandlers {
         return builder.build();
       } catch (IllegalArgumentException e) {
         throw badRequest(e);
+      } catch (IllegalStateException e) {
+        throw internal(e);
       }
     }
 
@@ -457,6 +459,8 @@ public final class GeneratedNexusOperationHandlers {
         return result;
       } catch (IllegalArgumentException e) {
         throw badRequest(e);
+      } catch (IllegalStateException e) {
+        throw internal(e);
       }
     }
 
@@ -474,6 +478,8 @@ public final class GeneratedNexusOperationHandlers {
         return result;
       } catch (IllegalArgumentException e) {
         throw badRequest(e);
+      } catch (IllegalStateException e) {
+        throw internal(e);
       }
     }
 
@@ -498,6 +504,19 @@ public final class GeneratedNexusOperationHandlers {
       return new HandlerException(
           HandlerException.ErrorType.BAD_REQUEST,
           "Invalid Nexus input for " + definition.getName() + ": " + cause.getMessage(),
+          cause,
+          HandlerException.RetryBehavior.NON_RETRYABLE);
+    }
+
+    /**
+     * Maps a handler-side expression failure — an unreadable property, a getter that threw — to a
+     * non-retryable INTERNAL error. These faults are deterministic, so leaving retry behavior
+     * UNSPECIFIED would retry the operation until schedule-to-close for no benefit.
+     */
+    private HandlerException internal(IllegalStateException cause) {
+      return new HandlerException(
+          HandlerException.ErrorType.INTERNAL,
+          "Failed evaluating Nexus input for " + definition.getName() + ": " + cause.getMessage(),
           cause,
           HandlerException.RetryBehavior.NON_RETRYABLE);
     }
