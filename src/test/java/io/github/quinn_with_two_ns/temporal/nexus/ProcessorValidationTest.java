@@ -158,6 +158,49 @@ public class ProcessorValidationTest {
   }
 
   @Test
+  public void rejectsGeneratedClassNameCollisions() throws IOException {
+    Compilation compilation =
+        compile(
+            "GeneratedNameCollision",
+            source(
+                "  static class First {\n"
+                    + "    @Service interface DeploymentService {\n"
+                    + "      @Operation String start(String input);\n"
+                    + "    }\n"
+                    + "  }\n"
+                    + "  static class Second {\n"
+                    + "    @Service interface DeploymentService {\n"
+                    + "      @Operation String cancel(String input);\n"
+                    + "    }\n"
+                    + "  }\n"
+                    + "  @WorkflowInterface interface StartWorkflow {\n"
+                    + "    @WorkflowMethod String start(String input);\n"
+                    + "  }\n"
+                    + "  @WorkflowInterface interface CancelWorkflow {\n"
+                    + "    @WorkflowMethod String cancel(String input);\n"
+                    + "  }\n"
+                    + "  static class StartWorkflowImpl implements StartWorkflow {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = First.DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public String start(String input) { return input; }\n"
+                    + "  }\n"
+                    + "  static class CancelWorkflowImpl implements CancelWorkflow {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = Second.DeploymentService.class,"
+                    + " name = \"cancel\", workflowId = \"#{input}\")\n"
+                    + "    public String cancel(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "Generated class test.DeploymentServiceNexusBindings for"
+            + " test.TestSource.Second.DeploymentService collides with the binding generated for"
+            + " test.TestSource.First.DeploymentService;"
+            + " rename one service or move it to another package");
+  }
+
+  @Test
   public void rejectsUpdateMappingsUntilAsyncSupportExists() throws IOException {
     Compilation compilation =
         compile(
@@ -203,7 +246,7 @@ public class ProcessorValidationTest {
   @Test
   public void validatesNestedBeanMapListAndArrayExpressions() throws IOException {
     Compilation compilation =
-        compile(
+        compileFully(
             "TypedExpressions",
             source(
                 "  static class Base<T> {\n"
@@ -290,6 +333,30 @@ public class ProcessorValidationTest {
 
     assertFailureContains(
         compilation, "Invalid arguments[0] expression: property \"derived\" does not exist");
+  }
+
+  @Test
+  public void generatedBindingsCompileForGenericArrayParameters() throws IOException {
+    Compilation compilation =
+        compileFully(
+            "GenericArrayParameter",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(java.util.List<String>[] input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(java.util.List<String>[] v);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"generic-array\")\n"
+                    + "    public String run(java.util.List<String>[] v) { return \"x\"; }\n"
+                    + "  }\n"));
+
+    assertTrue(compilation.messages, compilation.success);
+    String generatedSource =
+        compilation.generatedSources.get("test/DeploymentServiceNexusBindings.java");
+    assertNotNull(compilation.generatedSources.toString(), generatedSource);
+    assertTrue(generatedSource, generatedSource.contains("java.util.List[].class"));
   }
 
   @Test
@@ -597,6 +664,52 @@ public class ProcessorValidationTest {
   }
 
   @Test
+  public void rejectsMissingPropertyInsideTemplateExpression() throws IOException {
+    Compilation compilation =
+        compile(
+            "MissingTemplateProperty",
+            source(
+                "  static class DeployInput {\n"
+                    + "    public String getId() { return \"id\"; }\n"
+                    + "  }\n"
+                    + "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(DeployInput input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(DeployInput value);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"wf-#{missing}\")\n"
+                    + "    public String run(DeployInput value) { return \"x\"; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation, "Invalid workflowId expression: property \"missing\" does not exist");
+  }
+
+  @Test
+  public void rejectsNullConstantInsideTemplateExpression() throws IOException {
+    Compilation compilation =
+        compile(
+            "NullTemplateConstant",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String value);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"wf-#{null}\")\n"
+                    + "    public String run(String value) { return value; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "Invalid workflowId expression: template expressions must not evaluate to null");
+  }
+
+  @Test
   public void rejectsExpressionTypeMismatch() throws IOException {
     Compilation compilation =
         compile(
@@ -620,6 +733,54 @@ public class ProcessorValidationTest {
         compilation,
         "Invalid arguments[0] expression: expression produces java.lang.String,"
             + " which cannot be converted to int");
+  }
+
+  @Test
+  public void rejectsOutOfRangeNumericLiterals() throws IOException {
+    Compilation compilation =
+        compile(
+            "OutOfRangeNumericLiteral",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(int value);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\","
+                    + " arguments = \"#{9999999999}\")\n"
+                    + "    public String run(int value) { return String.valueOf(value); }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "Invalid arguments[0] expression: expression \"#{9999999999}\" cannot be converted"
+            + " losslessly to java.lang.Integer");
+  }
+
+  @Test
+  public void rejectsMultiCharacterConstantsForCharTargets() throws IOException {
+    Compilation compilation =
+        compile(
+            "MultiCharacterConstant",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(char value);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\","
+                    + " arguments = \"#{'ab'}\")\n"
+                    + "    public String run(char value) { return String.valueOf(value); }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "Invalid arguments[0] expression: expression \"#{'ab'}\" produced java.lang.String,"
+            + " which cannot be converted to java.lang.Character");
   }
 
   @Test
@@ -700,6 +861,303 @@ public class ProcessorValidationTest {
   }
 
   @Test
+  public void rejectsNonPublicHandlerMethods() throws IOException {
+    Compilation compilation =
+        compile(
+            "NonPublicHandler",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    String helper(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(compilation, "Annotated Temporal handler methods must be public");
+  }
+
+  @Test
+  public void rejectsAnnotationsOnUndiscoverableHandlerMethods() throws IOException {
+    Compilation compilation =
+        compile(
+            "UndiscoverableHandler",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public String helper(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation, "Nexus annotation is not on a discoverable Temporal handler method");
+  }
+
+  @Test
+  public void rejectsAnnotationKindMismatchingTemporalHandlerKind() throws IOException {
+    Compilation compilation =
+        compile(
+            "HandlerKindMismatch",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation void start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod void run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @SignalOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public void run(String input) {}\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation, "Nexus annotation kind SIGNAL does not match Temporal handler kind WORKFLOW");
+  }
+
+  @Test
+  public void rejectsUnknownOperationNames() throws IOException {
+    Compilation compilation =
+        compile(
+            "UnknownOperationName",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"missing\", workflowId = \"#{input}\")\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "Nexus service test.TestSource.DeploymentService has no operation named missing");
+  }
+
+  @Test
+  public void rejectsArgumentCountMismatch() throws IOException {
+    Compilation compilation =
+        compile(
+            "ArgumentCountMismatch",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String first, String second);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\", arguments = \"#{input}\")\n"
+                    + "    public String run(String first, String second) { return first; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation, "Argument expression count 1 does not match Temporal parameter count 2");
+  }
+
+  @Test
+  public void rejectsIncompatibleDirectInput() throws IOException {
+    Compilation compilation =
+        compile(
+            "IncompatibleDirectInput",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(java.util.List<String> value);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"start\")\n"
+                    + "    public String run(java.util.List<String> value) { return \"x\"; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "Nexus input java.lang.String is not assignable to Temporal argument"
+            + " java.util.List<java.lang.String>");
+  }
+
+  @Test
+  public void rejectsMismatchedOutputTypes() throws IOException {
+    Compilation compilation =
+        compile(
+            "MismatchedOutput",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation Integer start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "Temporal output java.lang.String does not match Nexus output java.lang.Integer");
+  }
+
+  @Test
+  public void rejectsSignalOperationsWithNonVoidOutput() throws IOException {
+    Compilation compilation =
+        compile(
+            "SignalNonVoidOutput",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String cancel(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@SignalMethod String cancel(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @SignalOperation(service = DeploymentService.class,"
+                    + " name = \"cancel\", workflowId = \"#{input}\")\n"
+                    + "    public String cancel(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(compilation, "Signal Nexus operation output must be void");
+  }
+
+  @Test
+  public void rejectsDuplicateNexusOperationNames() throws IOException {
+    Compilation compilation =
+        compile(
+            "DuplicateOperationNames",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation(name = \"dup\") String start(String input);\n"
+                    + "    @Operation(name = \"dup\") String cancel(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"dup\", workflowId = \"#{input}\")\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(compilation, "Duplicate Nexus operation name dup");
+  }
+
+  @Test
+  public void rejectsOverloadedNexusServiceMethods() throws IOException {
+    Compilation compilation =
+        compile(
+            "OverloadedServiceMethods",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation(name = \"first\") String start(String input);\n"
+                    + "    @Operation(name = \"second\") String start(Integer input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"first\", workflowId = \"#{input}\")\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation, "Overloaded Nexus service methods cannot generate @OperationImpl methods");
+  }
+
+  @Test
+  public void rejectsOperationsWithMultipleParameters() throws IOException {
+    Compilation compilation =
+        compile(
+            "MultiParameterOperation",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String first, String second);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(compilation, "Nexus operations may have at most one input parameter");
+  }
+
+  @Test
+  public void rejectsServicesWithoutOperations() throws IOException {
+    Compilation compilation =
+        compile(
+            "EmptyService",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(compilation, "Typed Nexus service has no @Operation methods");
+  }
+
+  @Test
+  public void rejectsMethodServiceNotAnnotatedWithService() throws IOException {
+    Compilation compilation =
+        compile(
+            "MethodServiceNotAService",
+            source(
+                "  interface NotAService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = NotAService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation, "test.TestSource.NotAService is not annotated with @Service");
+  }
+
+  @Test
+  public void rejectsServiceMappingValueNotAnnotatedWithService() throws IOException {
+    Compilation compilation =
+        compile(
+            "MappingValueNotAService",
+            source(
+                "  interface NotAService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  @ServiceMapping(NotAService.class)\n"
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "test.TestSource.NotAService in @ServiceMapping is not annotated with @Service");
+  }
+
+  @Test
   public void discoversTemporalInterfaceInheritedThroughSuperclass() throws IOException {
     Compilation compilation =
         compile(
@@ -739,11 +1197,20 @@ public class ProcessorValidationTest {
   }
 
   private static Compilation compile(String name, String source) throws IOException {
-    return compile(name, source, "8");
+    return compile(name, source, "8", true);
   }
 
   private static Compilation compile(String name, String source, String sourceVersion)
       throws IOException {
+    return compile(name, source, sourceVersion, true);
+  }
+
+  private static Compilation compileFully(String name, String source) throws IOException {
+    return compile(name, source, "8", false);
+  }
+
+  private static Compilation compile(
+      String name, String source, String sourceVersion, boolean processingOnly) throws IOException {
     JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
     assertNotNull("Tests require a JDK", compiler);
     Path root = Files.createTempDirectory("nexus-annotation-processor-" + name);
@@ -758,7 +1225,8 @@ public class ProcessorValidationTest {
           compiler.getStandardFileManager(diagnostics, Locale.ROOT, UTF_8)) {
         Iterable<? extends JavaFileObject> units =
             fileManager.getJavaFileObjectsFromFiles(Collections.singletonList(sourceFile.toFile()));
-        List<String> options =
+        List<String> options = new ArrayList<>();
+        options.addAll(
             Arrays.asList(
                 "-classpath",
                 System.getProperty("java.class.path"),
@@ -767,8 +1235,10 @@ public class ProcessorValidationTest {
                 "-s",
                 generated.toString(),
                 "--release",
-                sourceVersion,
-                "-proc:only");
+                sourceVersion));
+        if (processingOnly) {
+          options.add("-proc:only");
+        }
         JavaCompiler.CompilationTask task =
             compiler.getTask(null, fileManager, diagnostics, options, null, units);
         task.setProcessors(Collections.singletonList(new NexusAnnotatedHandlerProcessor()));

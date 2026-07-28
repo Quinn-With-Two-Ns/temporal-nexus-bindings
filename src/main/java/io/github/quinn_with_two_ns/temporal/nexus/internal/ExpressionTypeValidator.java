@@ -46,11 +46,71 @@ final class ExpressionTypeValidator {
       throw new IllegalArgumentException(
           "expression produces " + result.type + ", which cannot be converted to " + targetType);
     }
+    validateConstantCoercion(expression, targetType);
+  }
+
+  /**
+   * Runs the runtime coercion on constant expressions so values that can never convert, such as
+   * integer literals outside the target range, fail compilation instead of every request.
+   */
+  private void validateConstantCoercion(ExpressionModel expression, TypeMirror targetType) {
+    if (!expression.singleExpression) {
+      return;
+    }
+    ExpressionModel.Segment segment = expression.segments.get(0);
+    if (!(segment instanceof ExpressionModel.ConstantSegment)) {
+      return;
+    }
+    @Nullable Object value = ((ExpressionModel.ConstantSegment) segment).value;
+    if (value == null) {
+      return;
+    }
+    @Nullable Class<?> runtimeTarget = runtimeClass(boxed(targetType));
+    if (runtimeTarget == null) {
+      return;
+    }
+    InputExpression.coerce(value, runtimeTarget, expression.source);
+  }
+
+  private @Nullable Class<?> runtimeClass(TypeMirror type) {
+    String name = type.toString();
+    if (name.equals(Byte.class.getName())) return Byte.class;
+    if (name.equals(Short.class.getName())) return Short.class;
+    if (name.equals(Integer.class.getName())) return Integer.class;
+    if (name.equals(Long.class.getName())) return Long.class;
+    if (name.equals(Float.class.getName())) return Float.class;
+    if (name.equals(Double.class.getName())) return Double.class;
+    if (name.equals(BigDecimal.class.getName())) return BigDecimal.class;
+    if (name.equals(Character.class.getName())) return Character.class;
+    if (name.equals(Boolean.class.getName())) return Boolean.class;
+    if (name.equals(String.class.getName())) return String.class;
+    return null;
   }
 
   private InferredType infer(ExpressionModel expression, TypeMirror inputType) {
     if (!expression.singleExpression) {
-      return known(type(STRING));
+      TypeMirror string = type(STRING);
+      for (ExpressionModel.Segment segment : expression.segments) {
+        if (segment instanceof ExpressionModel.LiteralSegment) {
+          continue;
+        }
+        InferredType part = infer(segment, inputType);
+        if (part.dynamic) {
+          continue;
+        }
+        TypeMirror partType = Objects.requireNonNull(part.type);
+        if (partType.getKind() == TypeKind.NULL) {
+          throw new IllegalArgumentException("template expressions must not evaluate to null");
+        }
+        if (!canCoerce(partType, string)) {
+          throw new IllegalArgumentException(
+              "template expression produces "
+                  + partType
+                  + ", which cannot be converted to "
+                  + string);
+        }
+      }
+      return known(string);
     }
     return infer(expression.segments.get(0), inputType);
   }

@@ -51,6 +51,10 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   private static final String ACTIVITY = PACKAGE + "ActivityOperation";
   private static final String SERVICE_MAPPING = PACKAGE + "ServiceMapping";
 
+  /** Fixed processing order so diagnostics and duplicate-mapping precedence are deterministic. */
+  private static final List<String> OPERATION_ANNOTATIONS =
+      Collections.unmodifiableList(Arrays.asList(WORKFLOW, SIGNAL, QUERY, UPDATE, ACTIVITY));
+
   private static final String NEXUS_SERVICE = "io.nexusrpc.Service";
   private static final String NEXUS_OPERATION = "io.nexusrpc.Operation";
   private static final String WORKFLOW_INTERFACE = "io.temporal.workflow.WorkflowInterface";
@@ -78,7 +82,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
 
   @Override
   public Set<String> getSupportedAnnotationTypes() {
-    Set<String> annotations = operationAnnotationTypes();
+    Set<String> annotations = new HashSet<>(OPERATION_ANNOTATIONS);
     annotations.add(SERVICE_MAPPING);
     return annotations;
   }
@@ -96,7 +100,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     }
     Map<String, ServiceModel> services = new LinkedHashMap<>();
     boolean valid = validateServiceMappings(roundEnvironment);
-    for (String annotationName : operationAnnotationTypes()) {
+    for (String annotationName : OPERATION_ANNOTATIONS) {
       @Nullable TypeElement annotation = elements.getTypeElement(annotationName);
       if (annotation == null) {
         continue;
@@ -119,6 +123,25 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     for (ServiceModel service : services.values()) {
       valid &= validateCompleteService(service);
     }
+    // A HashMap is safe here despite the deterministic-output rule: it is only probed, never
+    // iterated. Diagnostic order comes from services.values(), which is a LinkedHashMap.
+    Map<String, ServiceModel> generatedNames = new HashMap<>();
+    for (ServiceModel service : services.values()) {
+      @Nullable ServiceModel existing =
+          generatedNames.put(service.qualifiedGeneratedName(), service);
+      if (existing != null) {
+        error(
+            service.service,
+            "Generated class "
+                + service.qualifiedGeneratedName()
+                + " for "
+                + service.service.getQualifiedName()
+                + " collides with the binding generated for "
+                + existing.service.getQualifiedName()
+                + "; rename one service or move it to another package");
+        valid = false;
+      }
+    }
     if (valid) {
       for (ServiceModel service : services.values()) {
         try {
@@ -131,10 +154,6 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     }
     generated = true;
     return false;
-  }
-
-  private Set<String> operationAnnotationTypes() {
-    return new HashSet<>(Arrays.asList(WORKFLOW, SIGNAL, QUERY, UPDATE, ACTIVITY));
   }
 
   private boolean validateServiceMappings(RoundEnvironment roundEnvironment) {
@@ -573,10 +592,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   }
 
   private void generateService(ServiceModel service) throws IOException {
-    String qualifiedName =
-        service.packageName.isEmpty()
-            ? service.generatedClassName
-            : service.packageName + "." + service.generatedClassName;
+    String qualifiedName = service.qualifiedGeneratedName();
     List<Element> origins = new ArrayList<>();
     origins.add(service.service);
     for (MappingModel mapping : service.mappings.values()) {
@@ -836,8 +852,15 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     if (annotation == null) {
       return result;
     }
+    // Only explicit values are read. Defaults stored in the annotation class files may surface as
+    // unresolved javac proxies whose AnnotationValue.getValue() throws, depending on class
+    // completion order. Absent members therefore surface here as null, "", or an empty array, and
+    // every call site already treats that identically to the member's declared default — the
+    // void.class sentinel for `service`, and an all-empty @WorkflowStartOptions for `options`.
+    // Adding a member whose default is not equivalent to absent requires handling it explicitly at
+    // the call site; it would otherwise be silently dropped.
     for (Map.Entry<? extends ExecutableElement, ? extends AnnotationValue> entry :
-        elements.getElementValuesWithDefaults(annotation).entrySet()) {
+        annotation.getElementValues().entrySet()) {
       result.put(entry.getKey().getSimpleName().toString(), entry.getValue());
     }
     return result;
@@ -900,11 +923,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   }
 
   private String classLiteral(TypeMirror type) {
-    TypeMirror boxed = boxed(type);
-    if (boxed.getKind() == TypeKind.ARRAY) {
-      return boxed.toString() + ".class";
-    }
-    return types.erasure(boxed).toString() + ".class";
+    return types.erasure(boxed(type)).toString() + ".class";
   }
 
   private String factoryMethod(HandlerKind kind) {
@@ -1171,6 +1190,10 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
       this.packageName = packageName;
       this.generatedClassName = generatedClassName;
       this.operations = operations;
+    }
+
+    private String qualifiedGeneratedName() {
+      return packageName.isEmpty() ? generatedClassName : packageName + "." + generatedClassName;
     }
   }
 }

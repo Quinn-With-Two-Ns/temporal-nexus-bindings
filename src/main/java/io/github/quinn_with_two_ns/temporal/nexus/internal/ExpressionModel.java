@@ -79,13 +79,16 @@ final class ExpressionModel {
     int position = 0;
     while (position < body.length()) {
       if (body.charAt(position) == '.') {
+        if (steps.isEmpty()) {
+          throw new IllegalArgumentException("path cannot start with '.' in \"#{" + body + "}\"");
+        }
         position++;
       }
       if (position >= body.length()) {
         throw new IllegalArgumentException("path cannot end with '.' in \"#{" + body + "}\"");
       }
       if (body.charAt(position) == '[') {
-        int closing = body.indexOf(']', position);
+        int closing = findClosingDelimiter(body, position + 1, ']');
         if (closing < 0) {
           throw new IllegalArgumentException(
               "unterminated container access in \"#{" + body + "}\"");
@@ -102,6 +105,11 @@ final class ExpressionModel {
                   + "}\"");
         }
         position = closing + 1;
+        if (position < body.length()
+            && body.charAt(position) != '.'
+            && body.charAt(position) != '[') {
+          throw new IllegalArgumentException("unsupported path syntax in \"#{" + body + "}\"");
+        }
         continue;
       }
       int start = position;
@@ -163,16 +171,25 @@ final class ExpressionModel {
   }
 
   private static int findClosingBrace(String source, int position) {
+    return findClosingDelimiter(source, position, '}');
+  }
+
+  private static int findClosingDelimiter(String source, int position, char delimiter) {
     char quote = 0;
+    boolean escaped = false;
     for (int i = position; i < source.length(); i++) {
       char current = source.charAt(i);
       if (quote != 0) {
-        if (current == quote && source.charAt(i - 1) != '\\') {
+        if (escaped) {
+          escaped = false;
+        } else if (current == '\\') {
+          escaped = true;
+        } else if (current == quote) {
           quote = 0;
         }
       } else if (current == '\'' || current == '"') {
         quote = current;
-      } else if (current == '}') {
+      } else if (current == delimiter) {
         return i;
       }
     }
@@ -180,13 +197,54 @@ final class ExpressionModel {
   }
 
   private static boolean isQuoted(String value) {
-    return value.length() >= 2
-        && ((value.charAt(0) == '\'' && value.charAt(value.length() - 1) == '\'')
-            || (value.charAt(0) == '"' && value.charAt(value.length() - 1) == '"'));
+    if (value.length() < 2) {
+      return false;
+    }
+    char quote = value.charAt(0);
+    if (quote != '\'' && quote != '"') {
+      return false;
+    }
+    boolean escaped = false;
+    for (int i = 1; i < value.length(); i++) {
+      char current = value.charAt(i);
+      if (escaped) {
+        escaped = false;
+      } else if (current == '\\') {
+        escaped = true;
+      } else if (current == quote) {
+        return i == value.length() - 1;
+      }
+    }
+    return false;
   }
 
   private static String unquote(String value) {
-    return value.substring(1, value.length() - 1);
+    String body = value.substring(1, value.length() - 1);
+    if (body.indexOf('\\') < 0) {
+      return body;
+    }
+    StringBuilder result = new StringBuilder(body.length());
+    boolean escaped = false;
+    for (int i = 0; i < body.length(); i++) {
+      char current = body.charAt(i);
+      if (!escaped && current == '\\') {
+        escaped = true;
+        continue;
+      }
+      if (escaped && current != '\\' && current != '\'' && current != '"') {
+        // Silently dropping the backslash would quietly change the meaning of literals such as
+        // 'C:\path'. Only the escapes the parser itself honors are accepted.
+        throw new IllegalArgumentException(
+            "unsupported escape \"\\"
+                + current
+                + "\" in "
+                + value
+                + "; only \\\\, \\' and \\\" are supported");
+      }
+      escaped = false;
+      result.append(current);
+    }
+    return result.toString();
   }
 
   interface Segment {}

@@ -39,9 +39,11 @@ final class InputExpression {
       StringBuilder result = new StringBuilder();
       for (ExpressionModel.Segment segment : model.segments) {
         @Nullable Object part = evaluate(segment, input, requestId, headers);
-        if (part != null) {
-          result.append(part);
+        if (part == null) {
+          throw new IllegalArgumentException(
+              "expression \"" + model.source + "\" evaluated to null within a template");
         }
+        result.append(part);
       }
       value = result.toString();
     }
@@ -201,7 +203,8 @@ final class InputExpression {
       try {
         return method.invoke(value);
       } catch (ReflectiveOperationException e) {
-        throw new IllegalArgumentException("failed reading property \"" + property + "\"", e);
+        // A handler-side fault, not invalid caller input; must not surface as BAD_REQUEST.
+        throw new IllegalStateException("failed reading property \"" + property + "\"", e);
       }
     }
     try {
@@ -211,17 +214,51 @@ final class InputExpression {
       throw new IllegalArgumentException(
           "property \"" + property + "\" does not exist on " + type.getName(), e);
     } catch (ReflectiveOperationException e) {
-      throw new IllegalArgumentException("failed reading field \"" + property + "\"", e);
+      throw new IllegalStateException("failed reading field \"" + property + "\"", e);
     }
   }
 
   private static @Nullable Method findMethod(Class<?> type, String name) {
+    final Method method;
     try {
-      Method method = type.getMethod(name);
-      return method.getParameterTypes().length == 0 ? method : null;
+      method = type.getMethod(name);
     } catch (NoSuchMethodException e) {
       return null;
     }
+    if (method.getParameterTypes().length != 0) {
+      return null;
+    }
+    if (Modifier.isPublic(method.getDeclaringClass().getModifiers())) {
+      return method;
+    }
+    // The method is declared on a non-public class, so invoking it directly throws
+    // IllegalAccessException. Prefer an equivalent declared on a public supertype.
+    @Nullable Method accessible = accessibleEquivalent(type, name);
+    return accessible == null ? method : accessible;
+  }
+
+  private static @Nullable Method accessibleEquivalent(@Nullable Class<?> type, String name) {
+    if (type == null) {
+      return null;
+    }
+    if (Modifier.isPublic(type.getModifiers())) {
+      try {
+        Method candidate = type.getMethod(name);
+        if (candidate.getParameterTypes().length == 0
+            && Modifier.isPublic(candidate.getDeclaringClass().getModifiers())) {
+          return candidate;
+        }
+      } catch (NoSuchMethodException e) {
+        // Keep searching supertypes.
+      }
+    }
+    for (Class<?> implemented : type.getInterfaces()) {
+      @Nullable Method candidate = accessibleEquivalent(implemented, name);
+      if (candidate != null) {
+        return candidate;
+      }
+    }
+    return accessibleEquivalent(type.getSuperclass(), name);
   }
 
   /**

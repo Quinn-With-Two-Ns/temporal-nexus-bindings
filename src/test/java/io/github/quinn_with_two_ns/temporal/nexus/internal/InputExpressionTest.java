@@ -1,9 +1,13 @@
 package io.github.quinn_with_two_ns.temporal.nexus.internal;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+import io.github.quinn_with_two_ns.temporal.nexus.NonPublicPropertyFixture;
+import java.math.BigDecimal;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.nio.charset.StandardCharsets;
@@ -130,6 +134,80 @@ public class InputExpressionTest {
   }
 
   @Test
+  public void evaluatesConstantExpressions() {
+    assertNull(InputExpression.compile("#{null}").evaluate(null, String.class));
+    assertEquals(false, InputExpression.compile("#{false}").evaluate(null, boolean.class));
+    assertEquals(
+        new BigDecimal("1.5"), InputExpression.compile("#{1.5}").evaluate(null, BigDecimal.class));
+    assertEquals(
+        Double.valueOf(1.5), InputExpression.compile("#{1.5}").evaluate(null, double.class));
+    assertEquals(Long.valueOf(42), InputExpression.compile("#{42}").evaluate(null, Long.class));
+    assertEquals(
+        Character.valueOf('a'), InputExpression.compile("#{'a'}").evaluate(null, char.class));
+  }
+
+  @Test
+  public void reportsNumericNullAndCharacterConversionFailures() {
+    assertEvaluationFailure(
+        InputExpression.compile("#{4294967296}"),
+        null,
+        Integer.class,
+        "cannot be converted losslessly");
+    assertEvaluationFailure(
+        InputExpression.compile("#{1.5}"), null, Integer.class, "cannot be converted losslessly");
+    assertEvaluationFailure(
+        InputExpression.compile("#{null}"), null, int.class, "evaluated to null for int");
+    assertEvaluationFailure(
+        InputExpression.compile("#{'ab'}"), null, char.class, "cannot be converted");
+  }
+
+  @Test
+  public void reportsContainerMisuse() {
+    Input input = new Input("deployment-7", new Nested("west"), "public-value");
+
+    assertEvaluationFailure(
+        InputExpression.compile("#{nestedArray[1]}"), input, Nested.class, "index 1 out of bounds");
+    assertEvaluationFailure(
+        InputExpression.compile("#{id['key']}"),
+        input,
+        String.class,
+        "map key access requires a Map");
+  }
+
+  @Test
+  public void readsPropertiesDeclaredOnNonPublicClasses() {
+    assertEquals(
+        "hidden",
+        InputExpression.compile("#{name}")
+            .evaluate(NonPublicPropertyFixture.hidden(), String.class));
+  }
+
+  @Test
+  public void reportsThrowingGettersAsHandlerSideFailures() {
+    try {
+      InputExpression.compile("#{boom}").evaluate(new Exploding(), String.class);
+      fail("Expected evaluation to fail");
+    } catch (IllegalStateException e) {
+      String message = String.valueOf(e.getMessage());
+      assertTrue(message, message.contains("failed reading property \"boom\""));
+    }
+  }
+
+  public static final class Exploding {
+    public String getBoom() {
+      throw new RuntimeException("boom");
+    }
+  }
+
+  @Test
+  public void rejectsAllForbiddenProperties() {
+    assertCompileFailure("#{getClass}", "forbidden property");
+    assertCompileFailure("#{classLoader}", "forbidden property");
+    assertCompileFailure("#{declaringClass}", "forbidden property");
+    assertCompileFailure("#{nested.class}", "forbidden property");
+  }
+
+  @Test
   public void rejectsUnsafeOrMalformedSyntax() {
     assertCompileFailure("#{input.getId()}", "unsupported path syntax");
     assertCompileFailure("#{class}", "forbidden property");
@@ -139,6 +217,41 @@ public class InputExpressionTest {
     assertCompileFailure("#{nexus}", "requires requestId or headers");
     assertCompileFailure("#{nexus.unknown}", "unsupported Nexus metadata property");
     assertCompileFailure("#{id", "unterminated expression");
+    assertCompileFailure("#{nestedItems[0]region}", "unsupported path syntax");
+    assertCompileFailure("#{.id}", "path cannot start with '.'");
+    assertCompileFailure("#{'a' 'b'}", "unsupported path syntax");
+    assertCompileFailure("#{metadata['key'}", "unterminated container access");
+  }
+
+  @Test
+  public void unescapesQuotedStringsAndBracketKeys() {
+    assertEquals("it's", InputExpression.compile("#{'it\\'s'}").evaluate(null, String.class));
+    assertEquals("a\\b", InputExpression.compile("#{'a\\\\b'}").evaluate(null, String.class));
+    assertEquals(
+        "value",
+        InputExpression.compile("#{['a]b']}")
+            .evaluate(Collections.singletonMap("a]b", "value"), String.class));
+  }
+
+  @Test
+  public void rejectsUnsupportedEscapes() {
+    // Dropping the backslash would silently turn 'C:\path' into "C:path".
+    assertCompileFailure("#{'C:\\path'}", "unsupported escape \"\\p\"");
+    assertCompileFailure("#{'a\\nb'}", "unsupported escape \"\\n\"");
+    assertCompileFailure("#{metadata['a\\tb']}", "unsupported escape \"\\t\"");
+  }
+
+  /**
+   * A public class inheriting a getter from a non-public base needs no supertype walk: javac emits
+   * an accessible bridge on the public subclass, so the declaring class is already public. Pinned
+   * because the guarantee is user-visible even though the mechanism lives outside this code.
+   */
+  @Test
+  public void readsPropertyInheritedFromNonPublicSuperclass() {
+    assertEquals(
+        "inherited",
+        InputExpression.compile("#{name}")
+            .evaluate(NonPublicPropertyFixture.inherited(), String.class));
   }
 
   @Test
@@ -209,6 +322,32 @@ public class InputExpressionTest {
           Files.deleteIfExists(path);
         }
       }
+    }
+  }
+
+  @Test
+  public void rejectsNullTemplateParts() {
+    NullableId nullId = new NullableId(null);
+    NullableId presentId = new NullableId("deployment-7");
+
+    assertEvaluationFailure(
+        InputExpression.compile("wf-#{id}"),
+        nullId,
+        String.class,
+        "evaluated to null within a template");
+    assertEquals(
+        "wf-deployment-7", InputExpression.compile("wf-#{id}").evaluate(presentId, String.class));
+  }
+
+  public static final class NullableId {
+    private final @Nullable String id;
+
+    NullableId(@Nullable String id) {
+      this.id = id;
+    }
+
+    public @Nullable String getId() {
+      return id;
     }
   }
 

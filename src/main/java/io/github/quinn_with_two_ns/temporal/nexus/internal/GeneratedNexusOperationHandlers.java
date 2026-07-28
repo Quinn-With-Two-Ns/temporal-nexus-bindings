@@ -6,6 +6,7 @@ import io.nexusrpc.handler.HandlerException;
 import io.nexusrpc.handler.OperationHandler;
 import io.temporal.api.enums.v1.WorkflowIdConflictPolicy;
 import io.temporal.api.enums.v1.WorkflowIdReusePolicy;
+import io.temporal.client.WorkflowNotFoundException;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.client.WorkflowStub;
 import io.temporal.common.Experimental;
@@ -60,7 +61,12 @@ public final class GeneratedNexusOperationHandlers {
               client
                   .getWorkflowClient()
                   .newUntypedWorkflowStub(binding.id(context, input, "workflowId"));
-          stub.signal(signalName, binding.arguments(context, input));
+          Object[] evaluatedArguments = binding.arguments(context, input);
+          try {
+            stub.signal(signalName, evaluatedArguments);
+          } catch (WorkflowNotFoundException e) {
+            throw binding.workflowNotFound(e);
+          }
           return TemporalOperationResult.sync(null);
         });
   }
@@ -80,12 +86,15 @@ public final class GeneratedNexusOperationHandlers {
               client
                   .getWorkflowClient()
                   .newUntypedWorkflowStub(binding.id(context, input, "workflowId"));
-          R result =
-              stub.query(
-                  queryName,
-                  binding.outputClass(),
-                  binding.outputType(),
-                  binding.arguments(context, input));
+          Object[] evaluatedArguments = binding.arguments(context, input);
+          final R result;
+          try {
+            result =
+                stub.query(
+                    queryName, binding.outputClass(), binding.outputType(), evaluatedArguments);
+          } catch (WorkflowNotFoundException e) {
+            throw binding.workflowNotFound(e);
+          }
           return TemporalOperationResult.sync(result);
         });
   }
@@ -425,6 +434,8 @@ public final class GeneratedNexusOperationHandlers {
         return builder.build();
       } catch (IllegalArgumentException e) {
         throw badRequest(e);
+      } catch (IllegalStateException e) {
+        throw internal(e);
       }
     }
 
@@ -448,6 +459,8 @@ public final class GeneratedNexusOperationHandlers {
         return result;
       } catch (IllegalArgumentException e) {
         throw badRequest(e);
+      } catch (IllegalStateException e) {
+        throw internal(e);
       }
     }
 
@@ -465,6 +478,8 @@ public final class GeneratedNexusOperationHandlers {
         return result;
       } catch (IllegalArgumentException e) {
         throw badRequest(e);
+      } catch (IllegalStateException e) {
+        throw internal(e);
       }
     }
 
@@ -489,6 +504,27 @@ public final class GeneratedNexusOperationHandlers {
       return new HandlerException(
           HandlerException.ErrorType.BAD_REQUEST,
           "Invalid Nexus input for " + definition.getName() + ": " + cause.getMessage(),
+          cause,
+          HandlerException.RetryBehavior.NON_RETRYABLE);
+    }
+
+    /**
+     * Maps a handler-side expression failure — an unreadable property, a getter that threw — to a
+     * non-retryable INTERNAL error. These faults are deterministic, so leaving retry behavior
+     * UNSPECIFIED would retry the operation until schedule-to-close for no benefit.
+     */
+    private HandlerException internal(IllegalStateException cause) {
+      return new HandlerException(
+          HandlerException.ErrorType.INTERNAL,
+          "Failed evaluating Nexus input for " + definition.getName() + ": " + cause.getMessage(),
+          cause,
+          HandlerException.RetryBehavior.NON_RETRYABLE);
+    }
+
+    private HandlerException workflowNotFound(WorkflowNotFoundException cause) {
+      return new HandlerException(
+          HandlerException.ErrorType.NOT_FOUND,
+          "No workflow execution found for " + definition.getName() + ": " + cause.getMessage(),
           cause,
           HandlerException.RetryBehavior.NON_RETRYABLE);
     }
