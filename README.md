@@ -19,8 +19,8 @@ Groovy DSL:
 
 ```groovy
 dependencies {
-    implementation "io.github.quinn-with-two-ns:temporal-nexus-bindings:0.1.0"
-    annotationProcessor "io.github.quinn-with-two-ns:temporal-nexus-bindings:0.1.0"
+    implementation "io.github.quinn-with-two-ns:temporal-nexus-bindings:0.2.0"
+    annotationProcessor "io.github.quinn-with-two-ns:temporal-nexus-bindings:0.2.0"
 }
 ```
 
@@ -28,8 +28,8 @@ Gradle Kotlin DSL:
 
 ```kotlin
 dependencies {
-    implementation("io.github.quinn-with-two-ns:temporal-nexus-bindings:0.1.0")
-    annotationProcessor("io.github.quinn-with-two-ns:temporal-nexus-bindings:0.1.0")
+    implementation("io.github.quinn-with-two-ns:temporal-nexus-bindings:0.2.0")
+    annotationProcessor("io.github.quinn-with-two-ns:temporal-nexus-bindings:0.2.0")
 }
 ```
 
@@ -45,7 +45,7 @@ Temporal SDK dependency can select a newer compatible version.
 <dependency>
   <groupId>io.github.quinn-with-two-ns</groupId>
   <artifactId>temporal-nexus-bindings</artifactId>
-  <version>0.1.0</version>
+  <version>0.2.0</version>
 </dependency>
 
 <build>
@@ -59,7 +59,7 @@ Temporal SDK dependency can select a newer compatible version.
           <path>
             <groupId>io.github.quinn-with-two-ns</groupId>
             <artifactId>temporal-nexus-bindings</artifactId>
-            <version>0.1.0</version>
+            <version>0.2.0</version>
           </path>
         </annotationProcessorPaths>
       </configuration>
@@ -357,8 +357,8 @@ plugins {
 }
 
 dependencies {
-    implementation("io.github.quinn-with-two-ns:temporal-nexus-bindings:0.1.0")
-    kapt("io.github.quinn-with-two-ns:temporal-nexus-bindings:0.1.0")
+    implementation("io.github.quinn-with-two-ns:temporal-nexus-bindings:0.2.0")
+    kapt("io.github.quinn-with-two-ns:temporal-nexus-bindings:0.2.0")
 }
 
 kapt {
