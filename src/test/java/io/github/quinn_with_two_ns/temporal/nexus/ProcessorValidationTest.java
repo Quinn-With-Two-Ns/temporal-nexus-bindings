@@ -199,8 +199,9 @@ public class ProcessorValidationTest {
                     + "    public String cancel(String input) { return input; }\n"
                     + "  }\n"));
 
-    // Mappings are read in a fixed order derived from the annotated elements, so the service
-    // reached first — through CancelWorkflowImpl — is the one the collision is reported against.
+    // Mappings are read in a fixed order derived from the annotated elements, so Second is reached
+    // first, through CancelWorkflowImpl. The collision is therefore reported against First, the
+    // service reached second, and names Second as the binding it collides with.
     assertFailureContains(
         compilation,
         "Generated class test.DeploymentServiceNexusBindings for"

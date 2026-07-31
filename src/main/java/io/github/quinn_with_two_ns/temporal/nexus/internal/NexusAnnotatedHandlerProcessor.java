@@ -224,7 +224,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     }
     boolean valid = true;
     List<TypeElement> fragments = new ArrayList<>();
-    for (Element element : roundEnvironment.getElementsAnnotatedWith(fragmentAnnotation)) {
+    for (Element element : sorted(roundEnvironment.getElementsAnnotatedWith(fragmentAnnotation))) {
       if (element.getKind() != ElementKind.CLASS) {
         error(element, "@NexusServiceFragment is only supported on classes");
         valid = false;
