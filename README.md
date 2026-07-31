@@ -228,13 +228,16 @@ DeploymentServiceNexusBindings.register(worker);
 Explicit registration means generated services are not exposed merely because their annotations
 were compiled. `register(worker)` returns the concrete generated binding. Use the typed
 `DeploymentServiceNexusBindings.create()` method instead when registration needs to be handled
-separately.
+separately. Both factories take an instance of every `@NexusServiceFragment` class the service has;
+see [Handwritten operation handlers](#handwritten-operation-handlers).
 
 ## Handwritten operation handlers
 
 Not every operation maps cleanly onto a Temporal handler. Annotate a class with
 `@NexusServiceFragment` to contribute ordinary Nexus SDK `@OperationImpl` methods to the same
-generated service:
+generated service. Each operation has exactly one provider, so the fragment below hand-writes
+`cancel` *instead of* the `@SignalOperation` mapping shown above — drop that mapping from
+`DeploymentWorkflowImpl` when adopting this fragment:
 
 ```java
 import io.github.quinn_with_two_ns.temporal.nexus.NexusServiceFragment;
@@ -270,7 +273,9 @@ DeploymentServiceNexusBindings.register(worker, new CancelFragment(registry));
 ```
 
 Fragment parameters appear in a stable order sorted by fully qualified fragment name, and each
-handler factory is called exactly once, while the binding is constructed.
+handler factory is called exactly once, while the binding is constructed. A service with at least
+one fragment has no no-argument `create()` and no `register(worker)`; both factories take every
+fragment instance, as above.
 
 A fragment method must be public, non-static, non-generic, parameterless, declare no thrown
 exceptions, and return `OperationHandler`. Its name must be the name of an operation method on the

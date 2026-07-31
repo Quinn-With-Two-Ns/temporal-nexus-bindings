@@ -6,6 +6,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import io.github.quinn_with_two_ns.temporal.nexus.internal.NexusAnnotatedHandlerProcessor;
+import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import javax.tools.DiagnosticCollector;
@@ -1245,6 +1247,70 @@ public class ProcessorValidationTest {
   }
 
   @Test
+  public void composesFragmentsDeclaredInAnotherPackageThanTheService() throws IOException {
+    Map<String, String> sources = new LinkedHashMap<>();
+    sources.put("test/TestSource.java", crossPackageService());
+    sources.put("frag/Holder.java", crossPackageFragment("public "));
+
+    Compilation compilation = compileFully("CrossPackageFragment", sources);
+
+    assertTrue(compilation.messages, compilation.success);
+    String generated = generatedBinding(compilation);
+    assertTrue(
+        generated,
+        generated.contains(
+            "  public static DeploymentServiceNexusBindings create(\n"
+                + "      frag.Holder.StartFragment startFragment) {\n"));
+  }
+
+  @Test
+  public void rejectsFragmentsNestedInNonPublicClasses() throws IOException {
+    Map<String, String> sources = new LinkedHashMap<>();
+    sources.put("test/TestSource.java", crossPackageService());
+    sources.put("frag/Holder.java", crossPackageFragment(""));
+
+    Compilation compilation = compileFully("NonPublicEnclosingFragment", sources);
+
+    assertFailureContains(
+        compilation,
+        "@NexusServiceFragment class frag.Holder.StartFragment must only be nested in public"
+            + " classes; frag.Holder is not public");
+  }
+
+  @Test
+  public void renamesFragmentParametersThatWouldShadowGeneratedNames() throws IOException {
+    Compilation compilation =
+        compileFully(
+            "ShadowingFragmentNames",
+            source(
+                deploymentService("    @Operation String cancel(String input);\n")
+                    + fragment(
+                        "Binding", handler("OperationHandler<String, String>", "start", "input"))
+                    + fragment(
+                        "Java", handler("OperationHandler<String, String>", "cancel", "input"))));
+
+    assertTrue(compilation.messages, compilation.success);
+    String generated = generatedBinding(compilation);
+    // `binding` is the local register(...) declares for the binding it creates, and `java` would
+    // obscure the java package in the qualified requireNonNull call the constructor emits.
+    assertTrue(
+        generated,
+        generated.contains(
+            "  public static DeploymentServiceNexusBindings create(\n"
+                + "      test.TestSource.Binding binding2,\n"
+                + "      test.TestSource.Java java2) {\n"
+                + "    return new DeploymentServiceNexusBindings(binding2, java2);\n"));
+    assertTrue(
+        generated,
+        generated.contains(
+            "  public static DeploymentServiceNexusBindings register(\n"
+                + "      io.temporal.worker.Worker worker,\n"
+                + "      test.TestSource.Binding binding2,\n"
+                + "      test.TestSource.Java java2) {\n"
+                + "    DeploymentServiceNexusBindings binding = create(binding2, java2);\n"));
+  }
+
+  @Test
   public void composesGeneratedAndHandwrittenOperationHandlers() throws IOException {
     Compilation compilation =
         compileFully(
@@ -1738,6 +1804,40 @@ public class ProcessorValidationTest {
   }
 
   @Test
+  public void rejectsFragmentsWithoutATypedNexusService() throws IOException {
+    Compilation compilation =
+        compile(
+            "FragmentWithoutService",
+            source(
+                deploymentService("")
+                    + "  @NexusServiceFragment(service = void.class)\n"
+                    + "  public static class StartFragment {\n"
+                    + handler("OperationHandler<String, String>", "start", "input")
+                    + "  }\n"));
+
+    assertFailureContains(compilation, "@NexusServiceFragment requires a typed Nexus service");
+  }
+
+  @Test
+  public void rejectsTypedNexusServicesThatAreNotInterfaces() throws IOException {
+    // io.nexusrpc.Service has no @Target, so javac accepts it on a class and the Nexus SDK only
+    // rejects it at runtime.
+    Compilation compilation =
+        compile(
+            "ServiceOnClass",
+            source(
+                "  @Service public static class DeploymentService {\n"
+                    + "    @Operation public String start(String input) { return input; }\n"
+                    + "  }\n"
+                    + fragment(
+                        "StartFragment",
+                        handler("OperationHandler<String, String>", "start", "input"))));
+
+    assertFailureContains(
+        compilation, "Typed Nexus service test.TestSource.DeploymentService must be an interface");
+  }
+
+  @Test
   public void rejectsFragmentAnnotationsOnInterfaces() throws IOException {
     Compilation compilation =
         compile(
@@ -1751,6 +1851,36 @@ public class ProcessorValidationTest {
                     + "  }\n"));
 
     assertFailureContains(compilation, "@NexusServiceFragment is only supported on classes");
+  }
+
+  /** A typed Nexus service in {@code test}, for compositions that span packages. */
+  private static String crossPackageService() {
+    return "package test;\n"
+        + "import io.nexusrpc.Operation;\n"
+        + "import io.nexusrpc.Service;\n"
+        + "public class TestSource {\n"
+        + "  @Service public interface DeploymentService {\n"
+        + "    @Operation String start(String input);\n"
+        + "  }\n"
+        + "}\n";
+  }
+
+  /** A fragment nested in {@code frag.Holder}, declared with the given holder modifiers. */
+  private static String crossPackageFragment(String holderModifiers) {
+    return "package frag;\n"
+        + "import io.github.quinn_with_two_ns.temporal.nexus.NexusServiceFragment;\n"
+        + "import io.nexusrpc.handler.OperationHandler;\n"
+        + "import io.nexusrpc.handler.OperationImpl;\n"
+        + holderModifiers
+        + "class Holder {\n"
+        + "  @NexusServiceFragment(service = test.TestSource.DeploymentService.class)\n"
+        + "  public static class StartFragment {\n"
+        + "    @OperationImpl\n"
+        + "    public OperationHandler<String, String> start() {\n"
+        + "      return OperationHandler.sync((context, details, input) -> input);\n"
+        + "    }\n"
+        + "  }\n"
+        + "}\n";
   }
 
   private static String deploymentService(String extraOperations) {
@@ -1821,20 +1951,42 @@ public class ProcessorValidationTest {
 
   private static Compilation compile(
       String name, String source, String sourceVersion, boolean processingOnly) throws IOException {
+    Map<String, String> sources = new LinkedHashMap<>();
+    sources.put("test/TestSource.java", source);
+    return compile(name, sources, sourceVersion, processingOnly);
+  }
+
+  /**
+   * Compiles several named sources together, for compositions that cannot be expressed in the
+   * single {@code test.TestSource} compilation unit the other cases use — notably fragments that
+   * live in another package than the typed service.
+   */
+  private static Compilation compileFully(String name, Map<String, String> sources)
+      throws IOException {
+    return compile(name, sources, "8", false);
+  }
+
+  private static Compilation compile(
+      String name, Map<String, String> sources, String sourceVersion, boolean processingOnly)
+      throws IOException {
     JavaCompiler compiler = ToolProvider.getSystemJavaCompiler();
     assertNotNull("Tests require a JDK", compiler);
     Path root = Files.createTempDirectory("nexus-annotation-processor-" + name);
     try {
-      Path sourceFile = root.resolve("test/TestSource.java");
-      Files.createDirectories(sourceFile.getParent());
-      Files.write(sourceFile, source.getBytes(UTF_8));
+      List<File> sourceFiles = new ArrayList<>();
+      for (Map.Entry<String, String> entry : sources.entrySet()) {
+        Path sourceFile = root.resolve(entry.getKey());
+        Files.createDirectories(Objects.requireNonNull(sourceFile.getParent()));
+        Files.write(sourceFile, entry.getValue().getBytes(UTF_8));
+        sourceFiles.add(sourceFile.toFile());
+      }
       Path classes = Files.createDirectories(root.resolve("classes"));
       Path generated = Files.createDirectories(root.resolve("generated"));
       DiagnosticCollector<JavaFileObject> diagnostics = new DiagnosticCollector<>();
       try (StandardJavaFileManager fileManager =
           compiler.getStandardFileManager(diagnostics, Locale.ROOT, UTF_8)) {
         Iterable<? extends JavaFileObject> units =
-            fileManager.getJavaFileObjectsFromFiles(Collections.singletonList(sourceFile.toFile()));
+            fileManager.getJavaFileObjectsFromFiles(sourceFiles);
         List<String> options = new ArrayList<>();
         options.addAll(
             Arrays.asList(

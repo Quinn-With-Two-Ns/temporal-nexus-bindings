@@ -287,6 +287,22 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
       error(fragment, prefix + "be a static nested class");
       valid = false;
     }
+    // The generated binding names the fragment by its qualified name, so every enclosing type has
+    // to be visible from the service's package too, not just the fragment itself.
+    Element enclosing = Objects.requireNonNull(fragment.getEnclosingElement());
+    while (enclosing instanceof TypeElement) {
+      if (!enclosing.getModifiers().contains(Modifier.PUBLIC)) {
+        error(
+            fragment,
+            prefix
+                + "only be nested in public classes; "
+                + ((TypeElement) enclosing).getQualifiedName()
+                + " is not public");
+        valid = false;
+        break;
+      }
+      enclosing = Objects.requireNonNull(enclosing.getEnclosingElement());
+    }
     if (!fragment.getTypeParameters().isEmpty()) {
       error(fragment, prefix + "not declare type parameters");
       valid = false;
@@ -369,7 +385,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
               + operationHandler(expectedInput, expectedOutput));
       return false;
     }
-    @Nullable String existing = service.provider(operation.name);
+    @Nullable String existing = service.fragmentProvider(operation.name);
     if (existing != null) {
       error(
           method,
@@ -773,6 +789,12 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   }
 
   private @Nullable ServiceModel readService(TypeElement service) {
+    // io.nexusrpc.Service has no @Target, so javac accepts it on a class; the Nexus SDK only
+    // rejects that at runtime, when ServiceDefinition.fromClass reflects over the service.
+    if (service.getKind() != ElementKind.INTERFACE) {
+      error(service, "Typed Nexus service " + service.getQualifiedName() + " must be an interface");
+      return null;
+    }
     Map<String, OperationModel> operations = new LinkedHashMap<>();
     Set<String> methodNames = new HashSet<>();
     for (ExecutableElement method : ElementFilter.methodsIn(elements.getAllMembers(service))) {
@@ -1618,11 +1640,13 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
 
   private static final class ServiceModel {
     /**
-     * Names the generated {@code register} method uses for itself, so a fragment whose simple name
-     * decapitalizes onto one of them is renamed instead of shadowing it.
+     * Names a generated factory parameter may not take, so a fragment whose simple name
+     * decapitalizes onto one of them is renamed instead. {@code worker} and {@code binding} are the
+     * local names {@code register} uses for itself; {@code java} would obscure the {@code java}
+     * package in the qualified {@code java.util.Objects} call the constructor emits (JLS 6.4.2).
      */
     private static final List<String> RESERVED_PARAMETERS =
-        Collections.unmodifiableList(Arrays.asList("worker", "binding"));
+        Collections.unmodifiableList(Arrays.asList("worker", "binding", "java"));
 
     private final TypeElement service;
     private final String packageName;
@@ -1656,15 +1680,12 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
       return null;
     }
 
-    /** Describes whichever mapping or fragment method already provides an operation. */
-    private @Nullable String provider(String operationName) {
-      @Nullable MappingModel mapping = mappings.get(operationName);
-      if (mapping != null) {
-        return "mapping "
-            + mapping.source.getEnclosingElement()
-            + "#"
-            + mapping.source.getSimpleName();
-      }
+    /**
+     * Describes the fragment method that already provides an operation, if any. Only fragments are
+     * consulted because every fragment is read before any mapping is; a mapping that collides with
+     * a fragment is reported against the mapping instead, by {@code readMapping}.
+     */
+    private @Nullable String fragmentProvider(String operationName) {
       @Nullable FragmentOperationModel fragmentOperation = fragmentOperations.get(operationName);
       return fragmentOperation == null ? null : fragmentOperation.description();
     }

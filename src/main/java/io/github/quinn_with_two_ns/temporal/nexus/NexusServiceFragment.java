@@ -12,7 +12,7 @@ import java.lang.annotation.Target;
  * Nexus service binding.
  *
  * <p>A fragment declares ordinary Nexus SDK {@code io.nexusrpc.handler.OperationImpl} factory
- * methods. Each method must be public, non-static, non-generic, parameterless, declare no checked
+ * methods. Each method must be public, non-static, non-generic, parameterless, declare no thrown
  * exceptions, return {@code io.nexusrpc.handler.OperationHandler}, and be named after an operation
  * method of the selected typed Nexus service.
  *
