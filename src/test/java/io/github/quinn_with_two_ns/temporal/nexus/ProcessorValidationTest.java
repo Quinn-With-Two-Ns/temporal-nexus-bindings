@@ -1875,47 +1875,6 @@ public class ProcessorValidationTest {
   }
 
   @Test
-  public void rejectsTypedNexusServicesThatAreNotInterfaces() throws IOException {
-    // io.nexusrpc.Service has no @Target, so javac accepts it on a class and the Nexus SDK only
-    // rejects it at runtime.
-    Compilation compilation =
-        compile(
-            "ServiceOnClass",
-            source(
-                "  @Service public static class DeploymentService {\n"
-                    + "    @Operation public String start(String input) { return input; }\n"
-                    + "  }\n"
-                    + fragment(
-                        "StartFragment",
-                        handler("OperationHandler<String, String>", "start", "input"))));
-
-    assertFailureContains(
-        compilation, "Typed Nexus service test.TestSource.DeploymentService must be an interface");
-  }
-
-  @Test
-  public void rejectsMappingsOntoTypedNexusServicesThatAreNotInterfaces() throws IOException {
-    // The same check guards the mapping path, which reaches readService without any fragment.
-    Compilation compilation =
-        compile(
-            "ServiceOnClassMapping",
-            source(
-                "  @Service public static class DeploymentService {\n"
-                    + "    @Operation public String start(String input) { return input; }\n"
-                    + "  }\n"
-                    + workflowInterface("@WorkflowMethod String run(String input);")
-                    + "  static class WorkflowImpl implements WorkflowContract {\n"
-                    + "    @Override\n"
-                    + "    @WorkflowOperation(service = DeploymentService.class,"
-                    + " name = \"start\", workflowId = \"#{input}\")\n"
-                    + "    public String run(String input) { return input; }\n"
-                    + "  }\n"));
-
-    assertFailureContains(
-        compilation, "Typed Nexus service test.TestSource.DeploymentService must be an interface");
-  }
-
-  @Test
   public void rejectsFragmentAnnotationsOnInterfaces() throws IOException {
     Compilation compilation =
         compile(

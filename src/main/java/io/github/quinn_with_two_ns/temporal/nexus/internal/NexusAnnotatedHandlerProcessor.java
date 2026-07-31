@@ -820,12 +820,6 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   }
 
   private @Nullable ServiceModel readService(TypeElement service) {
-    // io.nexusrpc.Service has no @Target, so javac accepts it on a class; the Nexus SDK only
-    // rejects that at runtime, when ServiceDefinition.fromClass reflects over the service.
-    if (service.getKind() != ElementKind.INTERFACE) {
-      error(service, "Typed Nexus service " + service.getQualifiedName() + " must be an interface");
-      return null;
-    }
     Map<String, OperationModel> operations = new LinkedHashMap<>();
     Set<String> methodNames = new HashSet<>();
     for (ExecutableElement method : ElementFilter.methodsIn(elements.getAllMembers(service))) {
