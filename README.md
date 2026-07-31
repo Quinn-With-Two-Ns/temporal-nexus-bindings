@@ -10,7 +10,7 @@ This project is independent of Temporal Technologies and is not an official Temp
 - Java 8 or newer.
 - Temporal Java SDK 1.37.0 or a compatible newer version.
 - A typed Nexus `@Service` interface.
-- All mappings for one service must be compiled together.
+- All mappings and fragments for one service must be compiled together.
 - Kotlin sources additionally require kapt. See [Kotlin](#kotlin).
 
 ## Gradle
@@ -230,6 +230,54 @@ were compiled. `register(worker)` returns the concrete generated binding. Use th
 `DeploymentServiceNexusBindings.create()` method instead when registration needs to be handled
 separately.
 
+## Handwritten operation handlers
+
+Not every operation maps cleanly onto a Temporal handler. Annotate a class with
+`@NexusServiceFragment` to contribute ordinary Nexus SDK `@OperationImpl` methods to the same
+generated service:
+
+```java
+import io.github.quinn_with_two_ns.temporal.nexus.NexusServiceFragment;
+import io.nexusrpc.handler.OperationHandler;
+import io.nexusrpc.handler.OperationImpl;
+
+@NexusServiceFragment(service = DeploymentService.class)
+public final class CancelFragment {
+  private final DeploymentRegistry registry;
+
+  public CancelFragment(DeploymentRegistry registry) {
+    this.registry = registry;
+  }
+
+  @OperationImpl
+  public OperationHandler<CancelDeploymentInput, Void> cancel() {
+    return OperationHandler.sync((context, details, input) -> {
+      registry.cancel(input.getId());
+      return null;
+    });
+  }
+}
+```
+
+The processor emits one `@ServiceImpl` class per typed service that delegates each operation to
+exactly one provider — an annotation-generated handler or a fragment method. Fragments are not
+Nexus service implementations themselves and cannot be registered on a worker; the generated
+factories require an instance of every fragment instead, so fragments can be constructed with
+application dependencies:
+
+```java
+DeploymentServiceNexusBindings.register(worker, new CancelFragment(registry));
+```
+
+Fragment parameters appear in a stable order sorted by fully qualified fragment name, and each
+handler factory is called exactly once, while the binding is constructed.
+
+A fragment method must be public, non-static, non-generic, parameterless, declare no thrown
+exceptions, and return `OperationHandler`. Its name must be the name of an operation method on the
+selected typed service, and its handler input and output types must match that operation. The
+processor rejects a service whose operations are not each provided exactly once, naming both
+contributing sources for a duplicate.
+
 ## Supported mappings
 
 - `@WorkflowOperation` starts a workflow asynchronously.
@@ -273,8 +321,9 @@ index, or a failed conversion fails the Nexus call as a non-retryable bad reques
 that exists but cannot be read — an inaccessible accessor, or a getter that throws — is a
 handler fault instead, and fails the call as a non-retryable internal error.
 
-Every operation in a referenced Nexus service must have exactly one annotated mapping. Missing,
-duplicate, incompatible, or malformed mappings fail compilation.
+Every operation in a referenced Nexus service must have exactly one provider: an annotated mapping
+or a handwritten `@NexusServiceFragment` method. Missing, duplicate, incompatible, or malformed
+providers fail compilation.
 
 ## Annotation parameters
 
@@ -291,6 +340,7 @@ The annotation-specific parameters are:
 | Annotation | Parameter | Default | Description |
 | --- | --- | --- | --- |
 | `@ServiceMapping` | `value` | Required | Default typed Nexus `@Service` interface for operation annotations on the Temporal workflow or activity implementation class. |
+| `@NexusServiceFragment` | `service` | Required | Typed Nexus `@Service` interface completed by this class's handwritten `@OperationImpl` methods. |
 | `@WorkflowOperation` | `workflowId` | Required | Literal or input-expression template that must produce a non-empty workflow ID. |
 | `@WorkflowOperation` | `options` | `@WorkflowStartOptions` | Options used to start the workflow. Empty members retain Temporal SDK defaults. |
 | `@SignalOperation` | `workflowId` | Required | Literal or input-expression template that must produce the non-empty ID of the workflow to signal. |
@@ -484,7 +534,8 @@ behave as documented.
 
 ## Boundaries
 
-- All mappings for one typed service must be visible to one annotation-processing compilation.
+- All mappings and `@NexusServiceFragment` classes for one typed service must be visible to one
+  annotation-processing compilation.
 - Cross-JAR mapping aggregation is intentionally unsupported.
 - KSP is unsupported. It does not run `javax.annotation.processing` processors, so Kotlin projects
   must enable kapt even when they otherwise use KSP.

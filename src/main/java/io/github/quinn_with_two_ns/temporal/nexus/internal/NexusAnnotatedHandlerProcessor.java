@@ -50,6 +50,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   private static final String UPDATE = PACKAGE + "UpdateOperation";
   private static final String ACTIVITY = PACKAGE + "ActivityOperation";
   private static final String SERVICE_MAPPING = PACKAGE + "ServiceMapping";
+  private static final String SERVICE_FRAGMENT = PACKAGE + "NexusServiceFragment";
 
   /** Fixed processing order so diagnostics and duplicate-mapping precedence are deterministic. */
   private static final List<String> OPERATION_ANNOTATIONS =
@@ -57,6 +58,9 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
 
   private static final String NEXUS_SERVICE = "io.nexusrpc.Service";
   private static final String NEXUS_OPERATION = "io.nexusrpc.Operation";
+  private static final String NEXUS_SERVICE_IMPL = "io.nexusrpc.handler.ServiceImpl";
+  private static final String NEXUS_OPERATION_IMPL = "io.nexusrpc.handler.OperationImpl";
+  private static final String NEXUS_OPERATION_HANDLER = "io.nexusrpc.handler.OperationHandler";
   private static final String WORKFLOW_INTERFACE = "io.temporal.workflow.WorkflowInterface";
   private static final String ACTIVITY_INTERFACE = "io.temporal.activity.ActivityInterface";
   private static final String WORKFLOW_METHOD = "io.temporal.workflow.WorkflowMethod";
@@ -84,6 +88,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   public Set<String> getSupportedAnnotationTypes() {
     Set<String> annotations = new HashSet<>(OPERATION_ANNOTATIONS);
     annotations.add(SERVICE_MAPPING);
+    annotations.add(SERVICE_FRAGMENT);
     return annotations;
   }
 
@@ -100,6 +105,9 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     }
     Map<String, ServiceModel> services = new LinkedHashMap<>();
     boolean valid = validateServiceMappings(roundEnvironment);
+    // Fragments are read first so that an operation provided by both a fragment and a mapping is
+    // always reported against the mapping, whatever order javac hands the annotated elements back.
+    valid &= readFragments(roundEnvironment, services);
     for (String annotationName : OPERATION_ANNOTATIONS) {
       @Nullable TypeElement annotation = elements.getTypeElement(annotationName);
       if (annotation == null) {
@@ -189,6 +197,226 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     return valid;
   }
 
+  private boolean readFragments(
+      RoundEnvironment roundEnvironment, Map<String, ServiceModel> services) {
+    @Nullable TypeElement fragmentAnnotation = elements.getTypeElement(SERVICE_FRAGMENT);
+    if (fragmentAnnotation == null) {
+      return true;
+    }
+    boolean valid = true;
+    List<TypeElement> fragments = new ArrayList<>();
+    for (Element element : roundEnvironment.getElementsAnnotatedWith(fragmentAnnotation)) {
+      if (element.getKind() != ElementKind.CLASS) {
+        error(element, "@NexusServiceFragment is only supported on classes");
+        valid = false;
+        continue;
+      }
+      fragments.add((TypeElement) element);
+    }
+    // Sorted so generated constructor parameters, and any duplicate-provider diagnostics between
+    // two fragments, do not depend on the order javac reports annotated elements in.
+    Collections.sort(
+        fragments, Comparator.comparing(fragment -> fragment.getQualifiedName().toString()));
+    for (TypeElement fragment : fragments) {
+      valid &= readFragment(fragment, services);
+    }
+    return valid;
+  }
+
+  private boolean readFragment(TypeElement fragment, Map<String, ServiceModel> services) {
+    @Nullable AnnotationMirror annotation = annotation(fragment, SERVICE_FRAGMENT);
+    @Nullable TypeMirror serviceType = typeValue(annotation, "service");
+    if (serviceType == null || serviceType.getKind() != TypeKind.DECLARED) {
+      error(fragment, "@NexusServiceFragment requires a typed Nexus service");
+      return false;
+    }
+    TypeElement serviceElement = (TypeElement) ((DeclaredType) serviceType).asElement();
+    if (annotation(serviceElement, NEXUS_SERVICE) == null) {
+      error(
+          fragment,
+          serviceElement.getQualifiedName()
+              + " in @NexusServiceFragment is not annotated with @Service");
+      return false;
+    }
+    boolean valid = validateFragmentClass(fragment, serviceElement);
+    @Nullable ServiceModel service = services.get(serviceElement.getQualifiedName().toString());
+    if (service == null) {
+      service = readService(serviceElement);
+      if (service == null) {
+        return false;
+      }
+      services.put(serviceElement.getQualifiedName().toString(), service);
+    }
+
+    List<ExecutableElement> handlerMethods = new ArrayList<>();
+    for (ExecutableElement method : ElementFilter.methodsIn(elements.getAllMembers(fragment))) {
+      if (annotation(method, NEXUS_OPERATION_IMPL) != null) {
+        handlerMethods.add(method);
+      }
+    }
+    if (handlerMethods.isEmpty()) {
+      error(
+          fragment,
+          "@NexusServiceFragment class "
+              + fragment.getQualifiedName()
+              + " declares no @OperationImpl methods");
+      return false;
+    }
+    Collections.sort(
+        handlerMethods, Comparator.comparing(method -> method.getSimpleName().toString()));
+    FragmentModel model = service.fragment(fragment);
+    for (ExecutableElement method : handlerMethods) {
+      valid &= readFragmentMethod(model, service, method);
+    }
+    return valid;
+  }
+
+  private boolean validateFragmentClass(TypeElement fragment, TypeElement service) {
+    String prefix = "@NexusServiceFragment class " + fragment.getQualifiedName() + " must ";
+    boolean valid = true;
+    if (!fragment.getModifiers().contains(Modifier.PUBLIC)) {
+      error(fragment, prefix + "be public");
+      valid = false;
+    }
+    if (fragment.getModifiers().contains(Modifier.ABSTRACT)) {
+      error(fragment, prefix + "not be abstract");
+      valid = false;
+    }
+    if (Objects.requireNonNull(fragment.getEnclosingElement()).getKind() != ElementKind.PACKAGE
+        && !fragment.getModifiers().contains(Modifier.STATIC)) {
+      error(fragment, prefix + "be a static nested class");
+      valid = false;
+    }
+    if (!fragment.getTypeParameters().isEmpty()) {
+      error(fragment, prefix + "not declare type parameters");
+      valid = false;
+    }
+    if (annotation(fragment, NEXUS_SERVICE_IMPL) != null) {
+      error(
+          fragment,
+          prefix
+              + "not be annotated with @ServiceImpl; fragments are composed into the binding"
+              + " generated for "
+              + service.getQualifiedName()
+              + " instead of being registered themselves");
+      valid = false;
+    }
+    return valid;
+  }
+
+  private boolean readFragmentMethod(
+      FragmentModel fragment, ServiceModel service, ExecutableElement method) {
+    String methodName = method.getSimpleName().toString();
+    String prefix =
+        "Nexus fragment handler method "
+            + fragment.type.getQualifiedName()
+            + "#"
+            + methodName
+            + " must ";
+    if (!method.getModifiers().contains(Modifier.PUBLIC)) {
+      error(method, prefix + "be public");
+      return false;
+    }
+    if (method.getModifiers().contains(Modifier.STATIC)) {
+      error(method, prefix + "not be static");
+      return false;
+    }
+    if (!method.getTypeParameters().isEmpty()) {
+      error(method, prefix + "not declare type parameters");
+      return false;
+    }
+    if (!method.getParameters().isEmpty()) {
+      error(method, prefix + "not declare parameters");
+      return false;
+    }
+    if (!method.getThrownTypes().isEmpty()) {
+      error(method, prefix + "not declare thrown exceptions");
+      return false;
+    }
+    @Nullable List<? extends TypeMirror> handlerTypes =
+        operationHandlerTypes(method.getReturnType());
+    if (handlerTypes == null) {
+      error(method, prefix + "return " + NEXUS_OPERATION_HANDLER + "<Input, Output>");
+      return false;
+    }
+    @Nullable OperationModel operation = service.operationForMethod(methodName);
+    if (operation == null) {
+      error(
+          method,
+          "Nexus service "
+              + service.service.getQualifiedName()
+              + " has no operation method named "
+              + methodName);
+      return false;
+    }
+    TypeMirror expectedInput = handlerType(operation.inputType);
+    TypeMirror expectedOutput = handlerType(operation.outputType);
+    if (!types.isSameType(handlerTypes.get(0), expectedInput)
+        || !types.isSameType(handlerTypes.get(1), expectedOutput)) {
+      error(
+          method,
+          "Nexus fragment handler method "
+              + fragment.type.getQualifiedName()
+              + "#"
+              + methodName
+              + " returns "
+              + operationHandler(handlerTypes.get(0), handlerTypes.get(1))
+              + " but Nexus operation "
+              + service.service.getQualifiedName()
+              + "#"
+              + methodName
+              + " requires "
+              + operationHandler(expectedInput, expectedOutput));
+      return false;
+    }
+    @Nullable String existing = service.provider(operation.name);
+    if (existing != null) {
+      error(
+          method,
+          "Duplicate provider for "
+              + service.service.getQualifiedName()
+              + "."
+              + operation.name
+              + "; also provided by "
+              + existing);
+      return false;
+    }
+    service.fragmentOperations.put(
+        operation.name, new FragmentOperationModel(fragment, operation, method));
+    return true;
+  }
+
+  /**
+   * Returns the input and output type arguments of an {@code OperationHandler} return type, or null
+   * when the type is not a parameterized {@code OperationHandler}.
+   */
+  private @Nullable List<? extends TypeMirror> operationHandlerTypes(TypeMirror returnType) {
+    if (returnType.getKind() != TypeKind.DECLARED) {
+      return null;
+    }
+    DeclaredType declared = (DeclaredType) returnType;
+    TypeElement element = (TypeElement) declared.asElement();
+    if (!element.getQualifiedName().contentEquals(NEXUS_OPERATION_HANDLER)
+        || declared.getTypeArguments().size() != 2) {
+      return null;
+    }
+    return declared.getTypeArguments();
+  }
+
+  /**
+   * Maps a Nexus operation input or output type onto its {@code OperationHandler} type argument.
+   */
+  private TypeMirror handlerType(TypeMirror operationType) {
+    if (operationType.getKind() != TypeKind.VOID) {
+      return operationType;
+    }
+    return Objects.requireNonNull(elements.getTypeElement(Void.class.getName())).asType();
+  }
+
+  private String operationHandler(TypeMirror input, TypeMirror output) {
+    return NEXUS_OPERATION_HANDLER + "<" + input + ", " + output + ">";
+  }
+
   private @Nullable MappingModel readMapping(
       ExecutableElement method, String annotationName, Map<String, ServiceModel> services) {
     HandlerKind kind = handlerKind(annotationName);
@@ -262,7 +490,8 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
               + operationName);
       return null;
     }
-    if (service.mappings.containsKey(operationName)) {
+    @Nullable MappingModel duplicateMapping = service.mappings.get(operationName);
+    if (duplicateMapping != null) {
       error(
           method,
           "Duplicate mapping for "
@@ -270,7 +499,20 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
               + "."
               + operationName
               + "; also mapped by "
-              + service.mappings.get(operationName).source);
+              + sourceLocation(duplicateMapping.source));
+      return null;
+    }
+    @Nullable FragmentOperationModel duplicateFragment =
+        service.fragmentOperations.get(operationName);
+    if (duplicateFragment != null) {
+      error(
+          method,
+          "Duplicate provider for "
+              + serviceElement.getQualifiedName()
+              + "."
+              + operationName
+              + "; also provided by "
+              + duplicateFragment.description());
       return null;
     }
 
@@ -583,6 +825,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   private boolean validateCompleteService(ServiceModel service) {
     List<String> missing = new ArrayList<>(service.operations.keySet());
     missing.removeAll(service.mappings.keySet());
+    missing.removeAll(service.fragmentOperations.keySet());
     if (!missing.isEmpty()) {
       Collections.sort(missing);
       error(service.service, "Incomplete Nexus service; missing operations: " + missing);
@@ -598,6 +841,10 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     for (MappingModel mapping : service.mappings.values()) {
       origins.add(mapping.source);
     }
+    for (FragmentModel fragment : service.fragments.values()) {
+      origins.add(fragment.type);
+    }
+    List<FragmentModel> fragments = new ArrayList<>(service.fragments.values());
     JavaFileObject sourceFile =
         filer.createSourceFile(qualifiedName, origins.toArray(new Element[0]));
     try (Writer writer = sourceFile.openWriter()) {
@@ -619,7 +866,73 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
               + service.service.getQualifiedName()
               + ".class)\n");
       writer.write("public final class " + service.generatedClassName + " {\n");
+      generateFragmentFields(writer, service);
+      generateConstructor(writer, service, fragments);
+      generateFactoryMethods(writer, service, fragments);
+
+      List<OperationModel> operations = new ArrayList<>(service.operations.values());
+      Collections.sort(operations, Comparator.comparing(operation -> operation.methodName));
+      for (OperationModel operation : operations) {
+        @Nullable MappingModel mapping = service.mappings.get(operation.name);
+        if (mapping != null) {
+          generateOperation(writer, service, mapping);
+        } else {
+          generateFragmentOperation(
+              writer,
+              service,
+              Objects.requireNonNull(service.fragmentOperations.get(operation.name)));
+        }
+      }
+      writer.write("}\n");
+    }
+  }
+
+  private void generateFragmentFields(Writer writer, ServiceModel service) throws IOException {
+    for (FragmentOperationModel operation : sortedFragmentOperations(service)) {
+      writer.write(
+          "  private final io.nexusrpc.handler.OperationHandler<"
+              + sourceType(operation.operation.inputType)
+              + ", "
+              + sourceType(operation.operation.outputType)
+              + "> "
+              + operation.operation.methodName
+              + ";\n");
+    }
+    if (!service.fragmentOperations.isEmpty()) {
+      writer.write("\n");
+    }
+  }
+
+  private void generateConstructor(
+      Writer writer, ServiceModel service, List<FragmentModel> fragments) throws IOException {
+    if (fragments.isEmpty()) {
       writer.write("  private " + service.generatedClassName + "() {}\n\n");
+      return;
+    }
+    writer.write("  private " + service.generatedClassName + "(\n");
+    writer.write(parameterList(fragments) + ") {\n");
+    // Each fragment factory is called exactly once, while the binding is constructed, so a fragment
+    // sees the same lifecycle as an annotation-generated handler.
+    for (FragmentOperationModel operation : sortedFragmentOperations(service)) {
+      String call = operation.fragment.parameterName + "." + operation.operation.methodName + "()";
+      writer.write("    this." + operation.operation.methodName + " =\n");
+      writer.write("        java.util.Objects.requireNonNull(\n");
+      writer.write("            " + call + ",\n");
+      writer.write(
+          "            "
+              + quote(
+                  operation.fragment.type.getQualifiedName()
+                      + "#"
+                      + operation.operation.methodName
+                      + "() returned a null operation handler")
+              + ");\n");
+    }
+    writer.write("  }\n\n");
+  }
+
+  private void generateFactoryMethods(
+      Writer writer, ServiceModel service, List<FragmentModel> fragments) throws IOException {
+    if (fragments.isEmpty()) {
       writer.write(
           "  /** Creates this generated Nexus binding. */\n"
               + "  public static "
@@ -645,14 +958,108 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
               + "    worker.registerNexusServiceImplementation(binding);\n"
               + "    return binding;\n"
               + "  }\n");
-
-      List<MappingModel> mappings = new ArrayList<>(service.mappings.values());
-      Collections.sort(mappings, Comparator.comparing(mapping -> mapping.operation.methodName));
-      for (MappingModel mapping : mappings) {
-        generateOperation(writer, service, mapping);
-      }
-      writer.write("}\n");
+      return;
     }
+    StringBuilder arguments = new StringBuilder();
+    StringBuilder fragmentDocs = new StringBuilder();
+    for (FragmentModel fragment : fragments) {
+      if (arguments.length() > 0) {
+        arguments.append(", ");
+      }
+      arguments.append(fragment.parameterName);
+      fragmentDocs
+          .append("   * @param ")
+          .append(fragment.parameterName)
+          .append(" handwritten operation handlers contributed by {@code ")
+          .append(javadocText(fragment.type.getQualifiedName().toString()))
+          .append("}\n");
+    }
+    writer.write(
+        "  /**\n"
+            + "   * Creates this generated Nexus binding.\n"
+            + "   *\n"
+            + fragmentDocs
+            + "   * @return the created binding\n"
+            + "   */\n"
+            + "  public static "
+            + service.generatedClassName
+            + " create(\n"
+            + parameterList(fragments)
+            + ") {\n"
+            + "    return new "
+            + service.generatedClassName
+            + "("
+            + arguments
+            + ");\n"
+            + "  }\n");
+    writer.write(
+        "\n  /**\n"
+            + "   * Creates and registers this generated Nexus binding.\n"
+            + "   *\n"
+            + "   * @param worker worker that will expose the typed Nexus service\n"
+            + fragmentDocs
+            + "   * @return the registered binding\n"
+            + "   */\n"
+            + "  public static "
+            + service.generatedClassName
+            + " register(\n"
+            + "      io.temporal.worker.Worker worker,\n"
+            + parameterList(fragments)
+            + ") {\n"
+            + "    "
+            + service.generatedClassName
+            + " binding = create("
+            + arguments
+            + ");\n"
+            + "    worker.registerNexusServiceImplementation(binding);\n"
+            + "    return binding;\n"
+            + "  }\n");
+  }
+
+  private String parameterList(List<FragmentModel> fragments) {
+    StringBuilder parameters = new StringBuilder();
+    for (int i = 0; i < fragments.size(); i++) {
+      if (i > 0) {
+        parameters.append(",\n");
+      }
+      FragmentModel fragment = fragments.get(i);
+      parameters
+          .append("      ")
+          .append(fragment.type.getQualifiedName())
+          .append(' ')
+          .append(fragment.parameterName);
+    }
+    return parameters.toString();
+  }
+
+  private List<FragmentOperationModel> sortedFragmentOperations(ServiceModel service) {
+    List<FragmentOperationModel> operations = new ArrayList<>(service.fragmentOperations.values());
+    Collections.sort(operations, Comparator.comparing(operation -> operation.operation.methodName));
+    return operations;
+  }
+
+  private void generateFragmentOperation(
+      Writer writer, ServiceModel service, FragmentOperationModel operation) throws IOException {
+    String nexusOperation =
+        service.service.getQualifiedName() + "#" + operation.operation.methodName;
+    writer.write(
+        "\n  /** Binds Nexus operation {@code "
+            + javadocText(nexusOperation)
+            + "} to handwritten handler {@code "
+            + javadocText(
+                operation.fragment.type.getQualifiedName() + "#" + operation.operation.methodName)
+            + "}. */\n");
+    writer.write("  @io.nexusrpc.handler.OperationImpl\n");
+    writer.write(
+        "  public io.nexusrpc.handler.OperationHandler<"
+            + sourceType(operation.operation.inputType)
+            + ", "
+            + sourceType(operation.operation.outputType)
+            + "> "
+            + operation.operation.methodName
+            + "() {\n");
+    writer.write("    return " + operation.operation.methodName + ";\n");
+    writer.write("  }\n");
   }
 
   private void generateOperation(Writer writer, ServiceModel service, MappingModel mapping)
@@ -1034,6 +1441,10 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     messager.printMessage(Diagnostic.Kind.ERROR, message, element);
   }
 
+  private String sourceLocation(ExecutableElement method) {
+    return Objects.requireNonNull(method.getEnclosingElement()) + "#" + method.getSimpleName();
+  }
+
   private enum HandlerKind {
     WORKFLOW,
     SIGNAL,
@@ -1174,12 +1585,52 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     }
   }
 
+  /** A handwritten class contributing {@code @OperationImpl} methods to a generated binding. */
+  private static final class FragmentModel {
+    private final TypeElement type;
+    private final String parameterName;
+
+    private FragmentModel(TypeElement type, String parameterName) {
+      this.type = type;
+      this.parameterName = parameterName;
+    }
+  }
+
+  private static final class FragmentOperationModel {
+    private final FragmentModel fragment;
+    private final OperationModel operation;
+    private final ExecutableElement method;
+
+    private FragmentOperationModel(
+        FragmentModel fragment, OperationModel operation, ExecutableElement method) {
+      this.fragment = fragment;
+      this.operation = operation;
+      this.method = method;
+    }
+
+    private String description() {
+      return "fragment handler method "
+          + fragment.type.getQualifiedName()
+          + "#"
+          + method.getSimpleName();
+    }
+  }
+
   private static final class ServiceModel {
+    /**
+     * Names the generated {@code register} method uses for itself, so a fragment whose simple name
+     * decapitalizes onto one of them is renamed instead of shadowing it.
+     */
+    private static final List<String> RESERVED_PARAMETERS =
+        Collections.unmodifiableList(Arrays.asList("worker", "binding"));
+
     private final TypeElement service;
     private final String packageName;
     private final String generatedClassName;
     private final Map<String, OperationModel> operations;
     private final Map<String, MappingModel> mappings = new LinkedHashMap<>();
+    private final Map<String, FragmentOperationModel> fragmentOperations = new LinkedHashMap<>();
+    private final Map<String, FragmentModel> fragments = new LinkedHashMap<>();
 
     private ServiceModel(
         TypeElement service,
@@ -1194,6 +1645,65 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
 
     private String qualifiedGeneratedName() {
       return packageName.isEmpty() ? generatedClassName : packageName + "." + generatedClassName;
+    }
+
+    private @Nullable OperationModel operationForMethod(String methodName) {
+      for (OperationModel operation : operations.values()) {
+        if (operation.methodName.equals(methodName)) {
+          return operation;
+        }
+      }
+      return null;
+    }
+
+    /** Describes whichever mapping or fragment method already provides an operation. */
+    private @Nullable String provider(String operationName) {
+      @Nullable MappingModel mapping = mappings.get(operationName);
+      if (mapping != null) {
+        return "mapping "
+            + mapping.source.getEnclosingElement()
+            + "#"
+            + mapping.source.getSimpleName();
+      }
+      @Nullable FragmentOperationModel fragmentOperation = fragmentOperations.get(operationName);
+      return fragmentOperation == null ? null : fragmentOperation.description();
+    }
+
+    /** Registers a fragment, assigning the stable parameter name generated factories use. */
+    private FragmentModel fragment(TypeElement type) {
+      String qualifiedName = type.getQualifiedName().toString();
+      @Nullable FragmentModel existing = fragments.get(qualifiedName);
+      if (existing != null) {
+        return existing;
+      }
+      FragmentModel fragment = new FragmentModel(type, parameterName(type));
+      fragments.put(qualifiedName, fragment);
+      return fragment;
+    }
+
+    private String parameterName(TypeElement type) {
+      String simpleName = type.getSimpleName().toString();
+      String base = Character.toLowerCase(simpleName.charAt(0)) + simpleName.substring(1);
+      if (SourceVersion.isKeyword(base)) {
+        base = base + "Fragment";
+      }
+      String candidate = base;
+      for (int suffix = 2; taken(candidate); suffix++) {
+        candidate = base + suffix;
+      }
+      return candidate;
+    }
+
+    private boolean taken(String parameterName) {
+      if (RESERVED_PARAMETERS.contains(parameterName)) {
+        return true;
+      }
+      for (FragmentModel fragment : fragments.values()) {
+        if (fragment.parameterName.equals(parameterName)) {
+          return true;
+        }
+      }
+      return false;
     }
   }
 }

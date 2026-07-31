@@ -7,6 +7,8 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import io.nexusrpc.Operation;
 import io.nexusrpc.Service;
 import io.nexusrpc.handler.HandlerException;
+import io.nexusrpc.handler.OperationHandler;
+import io.nexusrpc.handler.OperationImpl;
 import io.nexusrpc.handler.ServiceImplInstance;
 import io.temporal.client.WorkflowOptions;
 import io.temporal.common.RetryOptions;
@@ -35,6 +37,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.jspecify.annotations.Nullable;
 import org.junit.Test;
 
@@ -52,6 +55,49 @@ public class GeneratedBindingsIntegrationTest {
     assertEquals(
         Arrays.asList("cancel", "metadata", "probe", "start", "status"),
         new ArrayList<>(new TreeSet<>(service.getOperationHandlers().keySet())));
+  }
+
+  @Test
+  public void composedBindingCallsEachFragmentFactoryOnceAndExposesEveryOperation() {
+    EchoFragment fragment = new EchoFragment("echo:");
+    HybridServiceNexusBindings binding = HybridServiceNexusBindings.create(fragment);
+
+    // The handwritten factory runs while the binding is constructed, so a fragment can be built
+    // with application dependencies and still see the same lifecycle as a generated handler.
+    assertEquals(1, fragment.factoryCalls());
+
+    ServiceImplInstance service = ServiceImplInstance.fromInstance(binding);
+    assertEquals("HybridService", service.getDefinition().getName());
+    assertEquals(
+        Arrays.asList("echo", "greet"),
+        new ArrayList<>(new TreeSet<>(service.getOperationHandlers().keySet())));
+    // The Nexus SDK calls every @OperationImpl method while building the instance. The generated
+    // wrapper hands back the handler it already holds instead of calling the fragment again.
+    assertEquals(1, fragment.factoryCalls());
+  }
+
+  @Test
+  public void registeredCompositeServiceRunsGeneratedAndHandwrittenOperations() {
+    try (TestWorkflowEnvironment environment = TestWorkflowEnvironment.newInstance()) {
+      Worker nexusWorker = environment.newWorker(NEXUS_TASK_QUEUE);
+      nexusWorker.registerWorkflowImplementationTypes(
+          HybridCallerImpl.class, GreetingWorkflowImpl.class);
+      HybridServiceNexusBindings.register(nexusWorker, new EchoFragment("echo:"));
+      environment.createNexusEndpoint(ENDPOINT, NEXUS_TASK_QUEUE);
+      environment.start();
+
+      HybridCaller caller =
+          environment
+              .getWorkflowClient()
+              .newWorkflowStub(
+                  HybridCaller.class,
+                  WorkflowOptions.newBuilder()
+                      .setWorkflowId("hybrid-caller")
+                      .setTaskQueue(NEXUS_TASK_QUEUE)
+                      .build());
+
+      assertEquals("echo:world|hello world", caller.call("world"));
+    }
   }
 
   @Test
@@ -230,6 +276,76 @@ public class GeneratedBindingsIntegrationTest {
         }
         return "unexpected-cause: " + cause;
       }
+    }
+  }
+
+  /** Service whose operations are split between a generated mapping and a handwritten fragment. */
+  @Service
+  public interface HybridService {
+    @Operation
+    String greet(String input);
+
+    @Operation
+    String echo(String input);
+  }
+
+  @WorkflowInterface
+  public interface GreetingWorkflow {
+    @WorkflowMethod(name = "GreetingWorkflow")
+    String greet(String name);
+  }
+
+  @ServiceMapping(HybridService.class)
+  public static class GreetingWorkflowImpl implements GreetingWorkflow {
+    @Override
+    @WorkflowOperation(name = "greet", workflowId = "greeting-#{input}")
+    public String greet(String name) {
+      return "hello " + name;
+    }
+  }
+
+  /** Handwritten half of {@link HybridService}, constructed with an application dependency. */
+  @NexusServiceFragment(service = HybridService.class)
+  public static final class EchoFragment {
+    private final String prefix;
+    private final AtomicInteger factoryCalls = new AtomicInteger();
+
+    public EchoFragment(String prefix) {
+      this.prefix = prefix;
+    }
+
+    int factoryCalls() {
+      return factoryCalls.get();
+    }
+
+    @OperationImpl
+    public OperationHandler<String, String> echo() {
+      factoryCalls.incrementAndGet();
+      return OperationHandler.sync((context, details, input) -> prefix + input);
+    }
+  }
+
+  @WorkflowInterface
+  public interface HybridCaller {
+    @WorkflowMethod
+    String call(String input);
+  }
+
+  public static class HybridCallerImpl implements HybridCaller {
+    @Override
+    public String call(String input) {
+      NexusServiceOptions serviceOptions =
+          NexusServiceOptions.newBuilder()
+              .setEndpoint(ENDPOINT)
+              .setOperationOptions(
+                  NexusOperationOptions.newBuilder()
+                      .setScheduleToCloseTimeout(Duration.ofSeconds(10))
+                      .build())
+              .build();
+      HybridService service = Workflow.newNexusServiceStub(HybridService.class, serviceOptions);
+      NexusOperationHandle<String> greeting = Workflow.startNexusOperation(service::greet, input);
+      greeting.getExecution().get();
+      return service.echo(input) + "|" + greeting.getResult().get();
     }
   }
 

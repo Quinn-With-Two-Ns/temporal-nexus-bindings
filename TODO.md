@@ -120,25 +120,25 @@ implementation cost.
 
 ### Compose generated and handwritten operation handlers
 
-- [ ] Define a processor-only `@NexusServiceFragment(service = ...)` annotation for classes that
+- [x] Define a processor-only `@NexusServiceFragment(service = ...)` annotation for classes that
       contribute handwritten handlers to an otherwise generated Nexus service.
-- [ ] Reuse Nexus SDK `@OperationImpl` methods inside fragments instead of introducing another
+- [x] Reuse Nexus SDK `@OperationImpl` methods inside fragments instead of introducing another
       operation-handler method contract.
-- [ ] Generate one complete `@ServiceImpl` wrapper that delegates each operation to exactly one
+- [x] Generate one complete `@ServiceImpl` wrapper that delegates each operation to exactly one
       annotation-generated handler or fragment method; fragments must not be directly registerable
       as partial Nexus service implementations.
-- [ ] Generate typed `create(...)` and `register(...)` methods that require all fragment instances,
+- [x] Generate typed `create(...)` and `register(...)` methods that require all fragment instances,
       allowing callers to construct fragments with application dependencies.
-- [ ] Validate fragment methods during annotation processing:
+- [x] Validate fragment methods during annotation processing:
   - The method is public, non-static, non-generic, parameterless, and has no `throws` clause.
   - Its name identifies an operation in the selected typed Nexus service.
   - Its `OperationHandler` input and output types match the service operation.
   - Every service operation has exactly one generated or handwritten provider.
-- [ ] Report missing and duplicate providers with both contributing source locations.
-- [ ] Call each fragment handler factory once while constructing the generated service binding.
-- [ ] Initially require fragments and annotation mappings for one service to be visible in the same
+- [x] Report missing and duplicate providers with both contributing source locations.
+- [x] Call each fragment handler factory once while constructing the generated service binding.
+- [x] Initially require fragments and annotation mappings for one service to be visible in the same
       annotation-processing compilation, consistent with the existing aggregation boundary.
-- [ ] Add processor and end-to-end coverage for generated-only, fragment-only, hybrid,
+- [x] Add processor and end-to-end coverage for generated-only, fragment-only, hybrid,
       dependency-injected, missing, duplicate, and type-incompatible compositions.
 
 - [ ] Add a complete example application showing:

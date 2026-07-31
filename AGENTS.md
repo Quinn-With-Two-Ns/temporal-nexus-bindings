@@ -9,7 +9,9 @@ Guidance for AI coding agents working in this repository. Human-facing docs live
 It reads Temporal workflow/activity implementation classes annotated with `@WorkflowOperation`,
 `@SignalOperation`, `@QueryOperation`, `@UpdateOperation`, and `@ActivityOperation`, and generates a
 complete Nexus service implementation named `<TypedServiceSimpleName>NexusBindings` in the typed
-Nexus service's package.
+Nexus service's package. Operations that need handwritten logic are contributed by
+`@NexusServiceFragment` classes holding ordinary Nexus SDK `@OperationImpl` methods, which the
+same generated class delegates to.
 
 It is an experimental, community-maintained project, not an official Temporal SDK module.
 
@@ -17,8 +19,8 @@ It is an experimental, community-maintained project, not an official Temporal SD
 
 ```
 src/main/java/io/github/quinn_with_two_ns/temporal/nexus/
-  ServiceMapping.java, WorkflowOperation.java, SignalOperation.java, QueryOperation.java,
-  UpdateOperation.java, ActivityOperation.java, WorkflowStartOptions.java
+  ServiceMapping.java, NexusServiceFragment.java, WorkflowOperation.java, SignalOperation.java,
+  QueryOperation.java, UpdateOperation.java, ActivityOperation.java, WorkflowStartOptions.java
       Public annotation API. Every public type is @Experimental.
   internal/
     NexusAnnotatedHandlerProcessor.java   The javac processor: discovers mappings, validates them,

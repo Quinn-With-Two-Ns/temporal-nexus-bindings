@@ -154,7 +154,9 @@ public class ProcessorValidationTest {
                     + String.format(implementation, "SecondWorkflow")));
 
     assertFailureContains(
-        compilation, "Duplicate mapping for test.TestSource.DeploymentService.start");
+        compilation,
+        "Duplicate mapping for test.TestSource.DeploymentService.start; also mapped by"
+            + " test.TestSource.FirstWorkflow#run");
   }
 
   @Test
@@ -1180,10 +1182,618 @@ public class ProcessorValidationTest {
     assertTrue(compilation.messages, compilation.success);
   }
 
+  @Test
+  public void generatesFragmentOnlyServiceBindingRequiringTheFragmentInstance() throws IOException {
+    Compilation compilation =
+        compileFully(
+            "FragmentOnlyService",
+            source(
+                deploymentService("    @Operation void cancel(String input);\n")
+                    + fragment(
+                        "DeploymentFragment",
+                        "    private final String prefix;\n"
+                            + "    public DeploymentFragment(String prefix) {"
+                            + " this.prefix = prefix; }\n"
+                            + handler("OperationHandler<String, String>", "start", "prefix + input")
+                            + handler("OperationHandler<String, Void>", "cancel", "null"))));
+
+    assertTrue(compilation.messages, compilation.success);
+    String generated = generatedBinding(compilation);
+    assertTrue(
+        generated,
+        generated.contains(
+            "  private final io.nexusrpc.handler.OperationHandler<java.lang.String,"
+                + " java.lang.Void> cancel;\n"
+                + "  private final io.nexusrpc.handler.OperationHandler<java.lang.String,"
+                + " java.lang.String> start;\n"));
+    assertTrue(
+        generated,
+        generated.contains(
+            "  public static DeploymentServiceNexusBindings create(\n"
+                + "      test.TestSource.DeploymentFragment deploymentFragment) {\n"
+                + "    return new DeploymentServiceNexusBindings(deploymentFragment);\n"));
+    assertTrue(
+        generated,
+        generated.contains(
+            "  public static DeploymentServiceNexusBindings register(\n"
+                + "      io.temporal.worker.Worker worker,\n"
+                + "      test.TestSource.DeploymentFragment deploymentFragment) {\n"
+                + "    DeploymentServiceNexusBindings binding = create(deploymentFragment);\n"
+                + "    worker.registerNexusServiceImplementation(binding);\n"));
+    // The handler factory runs while the binding is constructed, so the @OperationImpl method the
+    // Nexus SDK calls hands back the same instance instead of invoking the fragment again.
+    assertTrue(
+        generated,
+        generated.contains(
+            "    this.start =\n"
+                + "        java.util.Objects.requireNonNull(\n"
+                + "            deploymentFragment.start(),\n"
+                + "            \"test.TestSource.DeploymentFragment#start() returned a null"
+                + " operation handler\");\n"));
+    assertTrue(
+        generated,
+        generated.contains(
+            "  public io.nexusrpc.handler.OperationHandler<java.lang.String, java.lang.String>"
+                + " start() {\n"
+                + "    return start;\n"));
+    assertTrue(
+        generated,
+        generated.contains(
+            "Nexus operation {@code test.TestSource.DeploymentService#start} to handwritten"
+                + " handler {@code test.TestSource.DeploymentFragment#start}"));
+    assertFalse(generated, generated.contains("create()"));
+  }
+
+  @Test
+  public void composesGeneratedAndHandwrittenOperationHandlers() throws IOException {
+    Compilation compilation =
+        compileFully(
+            "ComposedService",
+            source(
+                deploymentService("    @Operation String cancel(String input);\n")
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"
+                    + fragment(
+                        "CancelFragment",
+                        handler("OperationHandler<String, String>", "cancel", "input"))));
+
+    assertTrue(compilation.messages, compilation.success);
+    String generated = generatedBinding(compilation);
+    assertTrue(
+        generated,
+        generated.contains(
+            "    this.cancel =\n"
+                + "        java.util.Objects.requireNonNull(\n"
+                + "            cancelFragment.cancel(),"));
+    assertTrue(generated, generated.contains("    return cancel;\n"));
+    assertTrue(
+        generated,
+        generated.contains(
+            "GeneratedNexusOperationHandlers.workflow(\n" + "        test.TestSource."));
+    // Operation methods stay sorted by service method name across both provider kinds.
+    assertTrue(generated, generated.indexOf("> cancel() {") < generated.indexOf("> start() {"));
+  }
+
+  @Test
+  public void generatesDeterministicFactoryParametersForMultipleFragments() throws IOException {
+    Compilation compilation =
+        compileFully(
+            "MultipleFragments",
+            source(
+                deploymentService("    @Operation String cancel(String input);\n")
+                    + fragment(
+                        "Worker", handler("OperationHandler<String, String>", "start", "input"))
+                    + fragment(
+                        "Long", handler("OperationHandler<String, String>", "cancel", "input"))));
+
+    assertTrue(compilation.messages, compilation.success);
+    String generated = generatedBinding(compilation);
+    // Sorted by qualified name rather than declaration order, so output stays deterministic. The
+    // parameter names dodge the keyword `long` and the worker parameter `register` already uses.
+    assertTrue(
+        generated,
+        generated.contains(
+            "  public static DeploymentServiceNexusBindings create(\n"
+                + "      test.TestSource.Long longFragment,\n"
+                + "      test.TestSource.Worker worker2) {\n"
+                + "    return new DeploymentServiceNexusBindings(longFragment, worker2);\n"));
+    assertTrue(
+        generated,
+        generated.contains(
+            "  public static DeploymentServiceNexusBindings register(\n"
+                + "      io.temporal.worker.Worker worker,\n"
+                + "      test.TestSource.Long longFragment,\n"
+                + "      test.TestSource.Worker worker2) {\n"));
+  }
+
+  @Test
+  public void generatesFragmentHandlersForZeroArgumentAndVoidOperations() throws IOException {
+    Compilation compilation =
+        compileFully(
+            "VoidFragmentOperations",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation void ping();\n"
+                    + "  }\n"
+                    + fragment(
+                        "PingFragment", handler("OperationHandler<Void, Void>", "ping", "null"))));
+
+    assertTrue(compilation.messages, compilation.success);
+    String generated = generatedBinding(compilation);
+    assertTrue(
+        generated,
+        generated.contains(
+            "  public io.nexusrpc.handler.OperationHandler<java.lang.Void, java.lang.Void>"
+                + " ping() {\n"));
+  }
+
+  @Test
+  public void acceptsFragmentMethodsInheritedFromABaseClass() throws IOException {
+    Compilation compilation =
+        compileFully(
+            "InheritedFragmentMethods",
+            source(
+                deploymentService("")
+                    + "  public abstract static class BaseFragment {\n"
+                    + handler("OperationHandler<String, String>", "start", "input")
+                    + "  }\n"
+                    + "  @NexusServiceFragment(service = DeploymentService.class)\n"
+                    + "  public static class DeploymentFragment extends BaseFragment {}\n"));
+
+    assertTrue(compilation.messages, compilation.success);
+    String generated = generatedBinding(compilation);
+    assertTrue(
+        generated,
+        generated.contains(
+            "  public static DeploymentServiceNexusBindings create(\n"
+                + "      test.TestSource.DeploymentFragment deploymentFragment) {\n"));
+    assertTrue(generated, generated.contains("            deploymentFragment.start(),\n"));
+  }
+
+  @Test
+  public void identifiesFragmentOperationsByServiceMethodNameNotOperationName() throws IOException {
+    Compilation compilation =
+        compileFully(
+            "FragmentOperationIdentity",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation(name = \"start-deployment\") String start(String input);\n"
+                    + "  }\n"
+                    + fragment(
+                        "StartFragment",
+                        handler("OperationHandler<String, String>", "start", "input"))));
+
+    // The Nexus SDK matches @OperationImpl methods to the service's Java method name, so a fragment
+    // method is named after the method rather than after the wire-level operation name.
+    assertTrue(compilation.messages, compilation.success);
+    String generated = generatedBinding(compilation);
+    assertTrue(
+        generated,
+        generated.contains(
+            "  public io.nexusrpc.handler.OperationHandler<java.lang.String, java.lang.String>"
+                + " start() {\n"));
+  }
+
+  @Test
+  public void rejectsOperationProvidedByBothAFragmentAndAMapping() throws IOException {
+    Compilation compilation =
+        compile(
+            "FragmentAndMappingProvider",
+            source(
+                deploymentService("")
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"
+                    + fragment(
+                        "StartFragment",
+                        handler("OperationHandler<String, String>", "start", "input"))));
+
+    assertFailureContains(
+        compilation,
+        "Duplicate provider for test.TestSource.DeploymentService.start; also provided by"
+            + " fragment handler method test.TestSource.StartFragment#start");
+  }
+
+  @Test
+  public void rejectsOperationProvidedByTwoFragments() throws IOException {
+    Compilation compilation =
+        compile(
+            "TwoFragmentProviders",
+            source(
+                deploymentService("")
+                    + fragment(
+                        "AlphaFragment",
+                        handler("OperationHandler<String, String>", "start", "input"))
+                    + fragment(
+                        "BetaFragment",
+                        handler("OperationHandler<String, String>", "start", "input"))));
+
+    assertFailureContains(
+        compilation,
+        "Duplicate provider for test.TestSource.DeploymentService.start; also provided by"
+            + " fragment handler method test.TestSource.AlphaFragment#start");
+  }
+
+  @Test
+  public void rejectsServiceOperationsWithNoProvider() throws IOException {
+    Compilation compilation =
+        compile(
+            "FragmentIncompleteService",
+            source(
+                deploymentService("    @Operation void cancel(String input);\n")
+                    + fragment(
+                        "StartFragment",
+                        handler("OperationHandler<String, String>", "start", "input"))));
+
+    assertFailureContains(compilation, "Incomplete Nexus service; missing operations: [cancel]");
+  }
+
+  @Test
+  public void rejectsFragmentMethodsWithoutAMatchingServiceOperation() throws IOException {
+    Compilation compilation =
+        compile(
+            "UnknownFragmentOperation",
+            source(
+                deploymentService("")
+                    + fragment(
+                        "StartFragment",
+                        handler("OperationHandler<String, String>", "start", "input")
+                            + handler("OperationHandler<String, String>", "missing", "input"))));
+
+    assertFailureContains(
+        compilation,
+        "Nexus service test.TestSource.DeploymentService has no operation method named missing");
+  }
+
+  @Test
+  public void rejectsFragmentHandlersWithIncompatibleTypes() throws IOException {
+    Compilation compilation =
+        compile(
+            "FragmentTypeMismatch",
+            source(
+                deploymentService("")
+                    + fragment(
+                        "StartFragment",
+                        handler(
+                            "OperationHandler<Integer, String>", "start", "input.toString()"))));
+
+    assertFailureContains(
+        compilation,
+        "Nexus fragment handler method test.TestSource.StartFragment#start returns"
+            + " io.nexusrpc.handler.OperationHandler<java.lang.Integer, java.lang.String> but"
+            + " Nexus operation test.TestSource.DeploymentService#start requires"
+            + " io.nexusrpc.handler.OperationHandler<java.lang.String, java.lang.String>");
+  }
+
+  @Test
+  public void rejectsFragmentMethodsThatDoNotReturnAnOperationHandler() throws IOException {
+    Compilation compilation =
+        compile(
+            "FragmentReturnType",
+            source(
+                deploymentService("")
+                    + fragment(
+                        "StartFragment",
+                        "    @OperationImpl\n"
+                            + "    public String start() { return \"nope\"; }\n")));
+
+    assertFailureContains(
+        compilation,
+        "Nexus fragment handler method test.TestSource.StartFragment#start must return"
+            + " io.nexusrpc.handler.OperationHandler<Input, Output>");
+  }
+
+  @Test
+  public void rejectsRawOperationHandlerReturnTypes() throws IOException {
+    Compilation compilation =
+        compile(
+            "RawFragmentReturnType",
+            source(
+                deploymentService("")
+                    + fragment(
+                        "StartFragment",
+                        "    @OperationImpl\n"
+                            + "    @SuppressWarnings(\"rawtypes\")\n"
+                            + "    public OperationHandler start() { return null; }\n")));
+
+    assertFailureContains(
+        compilation,
+        "Nexus fragment handler method test.TestSource.StartFragment#start must return"
+            + " io.nexusrpc.handler.OperationHandler<Input, Output>");
+  }
+
+  @Test
+  public void rejectsFragmentMethodsWithParameters() throws IOException {
+    Compilation compilation =
+        compile(
+            "FragmentMethodParameters",
+            source(
+                deploymentService("")
+                    + fragment(
+                        "StartFragment",
+                        "    @OperationImpl\n"
+                            + "    public OperationHandler<String, String> start(String unused) {\n"
+                            + "      return OperationHandler.sync((c, d, input) -> input);\n"
+                            + "    }\n")));
+
+    assertFailureContains(
+        compilation,
+        "Nexus fragment handler method test.TestSource.StartFragment#start must not declare"
+            + " parameters");
+  }
+
+  @Test
+  public void rejectsGenericFragmentMethods() throws IOException {
+    Compilation compilation =
+        compile(
+            "GenericFragmentMethod",
+            source(
+                deploymentService("")
+                    + fragment(
+                        "StartFragment",
+                        "    @OperationImpl\n"
+                            + "    public <T> OperationHandler<String, String> start() {\n"
+                            + "      return OperationHandler.sync((c, d, input) -> input);\n"
+                            + "    }\n")));
+
+    assertFailureContains(
+        compilation,
+        "Nexus fragment handler method test.TestSource.StartFragment#start must not declare"
+            + " type parameters");
+  }
+
+  @Test
+  public void rejectsFragmentMethodsWithThrowsClauses() throws IOException {
+    Compilation compilation =
+        compile(
+            "FragmentMethodThrows",
+            source(
+                deploymentService("")
+                    + fragment(
+                        "StartFragment",
+                        "    @OperationImpl\n"
+                            + "    public OperationHandler<String, String> start()"
+                            + " throws java.io.IOException {\n"
+                            + "      return OperationHandler.sync((c, d, input) -> input);\n"
+                            + "    }\n")));
+
+    assertFailureContains(
+        compilation,
+        "Nexus fragment handler method test.TestSource.StartFragment#start must not declare"
+            + " thrown exceptions");
+  }
+
+  @Test
+  public void rejectsStaticFragmentMethods() throws IOException {
+    Compilation compilation =
+        compile(
+            "StaticFragmentMethod",
+            source(
+                deploymentService("")
+                    + fragment(
+                        "StartFragment",
+                        "    @OperationImpl\n"
+                            + "    public static OperationHandler<String, String> start() {\n"
+                            + "      return OperationHandler.sync((c, d, input) -> input);\n"
+                            + "    }\n")));
+
+    assertFailureContains(
+        compilation,
+        "Nexus fragment handler method test.TestSource.StartFragment#start must not be static");
+  }
+
+  @Test
+  public void rejectsNonPublicFragmentMethods() throws IOException {
+    Compilation compilation =
+        compile(
+            "NonPublicFragmentMethod",
+            source(
+                deploymentService("")
+                    + fragment(
+                        "StartFragment",
+                        "    @OperationImpl\n"
+                            + "    OperationHandler<String, String> start() {\n"
+                            + "      return OperationHandler.sync((c, d, input) -> input);\n"
+                            + "    }\n")));
+
+    assertFailureContains(
+        compilation,
+        "Nexus fragment handler method test.TestSource.StartFragment#start must be public");
+  }
+
+  @Test
+  public void rejectsNonPublicFragmentClasses() throws IOException {
+    Compilation compilation =
+        compile(
+            "NonPublicFragmentClass",
+            source(
+                deploymentService("")
+                    + "  @NexusServiceFragment(service = DeploymentService.class)\n"
+                    + "  static class StartFragment {\n"
+                    + handler("OperationHandler<String, String>", "start", "input")
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation, "@NexusServiceFragment class test.TestSource.StartFragment must be public");
+  }
+
+  @Test
+  public void rejectsAbstractFragmentClasses() throws IOException {
+    Compilation compilation =
+        compile(
+            "AbstractFragmentClass",
+            source(
+                deploymentService("")
+                    + "  @NexusServiceFragment(service = DeploymentService.class)\n"
+                    + "  public abstract static class StartFragment {\n"
+                    + handler("OperationHandler<String, String>", "start", "input")
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "@NexusServiceFragment class test.TestSource.StartFragment must not be abstract");
+  }
+
+  @Test
+  public void rejectsInnerFragmentClasses() throws IOException {
+    Compilation compilation =
+        compile(
+            "InnerFragmentClass",
+            source(
+                deploymentService("")
+                    + "  @NexusServiceFragment(service = DeploymentService.class)\n"
+                    + "  public class StartFragment {\n"
+                    + handler("OperationHandler<String, String>", "start", "input")
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "@NexusServiceFragment class test.TestSource.StartFragment must be a static nested class");
+  }
+
+  @Test
+  public void rejectsGenericFragmentClasses() throws IOException {
+    Compilation compilation =
+        compile(
+            "GenericFragmentClass",
+            source(
+                deploymentService("")
+                    + "  @NexusServiceFragment(service = DeploymentService.class)\n"
+                    + "  public static class StartFragment<T> {\n"
+                    + handler("OperationHandler<String, String>", "start", "input")
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "@NexusServiceFragment class test.TestSource.StartFragment must not declare type"
+            + " parameters");
+  }
+
+  @Test
+  public void rejectsDirectlyRegisterableFragments() throws IOException {
+    Compilation compilation =
+        compile(
+            "RegisterableFragment",
+            source(
+                deploymentService("")
+                    + "  @NexusServiceFragment(service = DeploymentService.class)\n"
+                    + "  @io.nexusrpc.handler.ServiceImpl(service = DeploymentService.class)\n"
+                    + "  public static class StartFragment {\n"
+                    + handler("OperationHandler<String, String>", "start", "input")
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "@NexusServiceFragment class test.TestSource.StartFragment must not be annotated with"
+            + " @ServiceImpl; fragments are composed into the binding generated for"
+            + " test.TestSource.DeploymentService instead of being registered themselves");
+  }
+
+  @Test
+  public void rejectsFragmentsWithoutOperationImplMethods() throws IOException {
+    Compilation compilation =
+        compile(
+            "EmptyFragment",
+            source(
+                deploymentService("")
+                    + "  @NexusServiceFragment(service = DeploymentService.class)\n"
+                    + "  public static class StartFragment {\n"
+                    + "    public OperationHandler<String, String> start() {\n"
+                    + "      return OperationHandler.sync((c, d, input) -> input);\n"
+                    + "    }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "@NexusServiceFragment class test.TestSource.StartFragment declares no @OperationImpl"
+            + " methods");
+  }
+
+  @Test
+  public void rejectsFragmentServiceNotAnnotatedWithService() throws IOException {
+    Compilation compilation =
+        compile(
+            "FragmentServiceNotAService",
+            source(
+                "  interface NotAService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "  }\n"
+                    + "  @NexusServiceFragment(service = NotAService.class)\n"
+                    + "  public static class StartFragment {\n"
+                    + handler("OperationHandler<String, String>", "start", "input")
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation,
+        "test.TestSource.NotAService in @NexusServiceFragment is not annotated with @Service");
+  }
+
+  @Test
+  public void rejectsFragmentAnnotationsOnInterfaces() throws IOException {
+    Compilation compilation =
+        compile(
+            "FragmentOnInterface",
+            source(
+                deploymentService("")
+                    + "  @NexusServiceFragment(service = DeploymentService.class)\n"
+                    + "  public interface StartFragment {\n"
+                    + "    @OperationImpl\n"
+                    + "    OperationHandler<String, String> start();\n"
+                    + "  }\n"));
+
+    assertFailureContains(compilation, "@NexusServiceFragment is only supported on classes");
+  }
+
+  private static String deploymentService(String extraOperations) {
+    return "  @Service interface DeploymentService {\n"
+        + "    @Operation String start(String input);\n"
+        + extraOperations
+        + "  }\n";
+  }
+
+  private static String fragment(String name, String body) {
+    return "  @NexusServiceFragment(service = DeploymentService.class)\n"
+        + "  public static class "
+        + name
+        + " {\n"
+        + body
+        + "  }\n";
+  }
+
+  private static String handler(String handlerType, String name, String result) {
+    return "    @OperationImpl\n"
+        + "    public "
+        + handlerType
+        + " "
+        + name
+        + "() {\n"
+        + "      return OperationHandler.sync((context, details, input) -> "
+        + result
+        + ");\n"
+        + "    }\n";
+  }
+
+  private static String generatedBinding(Compilation compilation) {
+    String generated = compilation.generatedSources.get("test/DeploymentServiceNexusBindings.java");
+    assertNotNull(compilation.generatedSources.toString(), generated);
+    return generated;
+  }
+
   private static String source(String body) {
     return "package test;\n"
         + "import io.nexusrpc.Operation;\n"
         + "import io.nexusrpc.Service;\n"
+        + "import io.nexusrpc.handler.OperationHandler;\n"
+        + "import io.nexusrpc.handler.OperationImpl;\n"
         + "import io.temporal.activity.*;\n"
         + "import io.github.quinn_with_two_ns.temporal.nexus.*;\n"
         + "import io.temporal.workflow.*;\n"
