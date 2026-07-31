@@ -16,6 +16,10 @@ import java.lang.annotation.Target;
  * exceptions, return {@code io.nexusrpc.handler.OperationHandler}, and be named after an operation
  * method of the selected typed Nexus service.
  *
+ * <p>The generated binding names the fragment class, so the class must be public, concrete,
+ * non-generic and declared in a named package; a nested fragment must be static and nested only in
+ * public classes.
+ *
  * <p>Fragments are not Nexus service implementations and cannot be registered on a worker
  * themselves. The processor composes every fragment method and every annotated operation mapping
  * into the single generated binding for the service, which then requires an instance of each

@@ -152,8 +152,11 @@ public class ProcessorValidationTest {
                     + "    @Operation String start(String input);\n"
                     + "  }\n"
                     + workflowInterface("@WorkflowMethod String run(String input);")
-                    + String.format(implementation, "FirstWorkflow")
-                    + String.format(implementation, "SecondWorkflow")));
+                    // Declared in the opposite order to the one the diagnostic reports, so the
+                    // assertion below holds only because mappings are read in a fixed order rather
+                    // than in whatever order javac hands the annotated elements back.
+                    + String.format(implementation, "SecondWorkflow")
+                    + String.format(implementation, "FirstWorkflow")));
 
     assertFailureContains(
         compilation,
@@ -196,11 +199,13 @@ public class ProcessorValidationTest {
                     + "    public String cancel(String input) { return input; }\n"
                     + "  }\n"));
 
+    // Mappings are read in a fixed order derived from the annotated elements, so the service
+    // reached first — through CancelWorkflowImpl — is the one the collision is reported against.
     assertFailureContains(
         compilation,
         "Generated class test.DeploymentServiceNexusBindings for"
-            + " test.TestSource.Second.DeploymentService collides with the binding generated for"
-            + " test.TestSource.First.DeploymentService;"
+            + " test.TestSource.First.DeploymentService collides with the binding generated for"
+            + " test.TestSource.Second.DeploymentService;"
             + " rename one service or move it to another package");
   }
 
@@ -1205,9 +1210,9 @@ public class ProcessorValidationTest {
         generated,
         generated.contains(
             "  private final io.nexusrpc.handler.OperationHandler<java.lang.String,"
-                + " java.lang.Void> cancel;\n"
+                + " java.lang.Void> cancelHandler;\n"
                 + "  private final io.nexusrpc.handler.OperationHandler<java.lang.String,"
-                + " java.lang.String> start;\n"));
+                + " java.lang.String> startHandler;\n"));
     assertTrue(
         generated,
         generated.contains(
@@ -1227,7 +1232,7 @@ public class ProcessorValidationTest {
     assertTrue(
         generated,
         generated.contains(
-            "    this.start =\n"
+            "    this.startHandler =\n"
                 + "        java.util.Objects.requireNonNull(\n"
                 + "            deploymentFragment.start(),\n"
                 + "            \"test.TestSource.DeploymentFragment#start() returned a null"
@@ -1237,7 +1242,7 @@ public class ProcessorValidationTest {
         generated.contains(
             "  public io.nexusrpc.handler.OperationHandler<java.lang.String, java.lang.String>"
                 + " start() {\n"
-                + "    return start;\n"));
+                + "    return startHandler;\n"));
     assertTrue(
         generated,
         generated.contains(
@@ -1275,6 +1280,20 @@ public class ProcessorValidationTest {
         compilation,
         "@NexusServiceFragment class frag.Holder.StartFragment must only be nested in public"
             + " classes; frag.Holder is not public");
+  }
+
+  @Test
+  public void rejectsFragmentsInTheDefaultPackageOfAServiceInANamedPackage() throws IOException {
+    Map<String, String> sources = new LinkedHashMap<>();
+    sources.put("test/TestSource.java", crossPackageService());
+    sources.put("DefaultFragment.java", defaultPackageFragment());
+
+    Compilation compilation = compileFully("DefaultPackageFragment", sources);
+
+    assertFailureContains(
+        compilation,
+        "@NexusServiceFragment class DefaultFragment must be declared in a named package; the"
+            + " binding generated in package test cannot name a class in the default package");
   }
 
   @Test
@@ -1333,10 +1352,10 @@ public class ProcessorValidationTest {
     assertTrue(
         generated,
         generated.contains(
-            "    this.cancel =\n"
+            "    this.cancelHandler =\n"
                 + "        java.util.Objects.requireNonNull(\n"
                 + "            cancelFragment.cancel(),"));
-    assertTrue(generated, generated.contains("    return cancel;\n"));
+    assertTrue(generated, generated.contains("    return cancelHandler;\n"));
     assertTrue(
         generated,
         generated.contains(
@@ -1443,6 +1462,42 @@ public class ProcessorValidationTest {
         generated.contains(
             "  public io.nexusrpc.handler.OperationHandler<java.lang.String, java.lang.String>"
                 + " start() {\n"));
+  }
+
+  @Test
+  public void generatesFieldNamesThatCannotObscurePackagesUsedByGeneratedCode() throws IOException {
+    Compilation compilation =
+        compileFully(
+            "PackageShadowingOperations",
+            source(
+                "  @Service interface DeploymentService {\n"
+                    + "    @Operation String start(String input);\n"
+                    + "    @Operation String java(String input);\n"
+                    + "    @Operation String io(String input);\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"
+                    + fragment(
+                        "PackageFragment",
+                        handler("OperationHandler<String, String>", "java", "input")
+                            + handler("OperationHandler<String, String>", "io", "input"))));
+
+    // Fields are named after the operation method, so an operation called `java` or `io` would
+    // otherwise reclassify the leading identifier of the qualified java.util.Objects and
+    // io.github...GeneratedNexusOperationHandlers calls the generator emits (JLS 6.5.2).
+    assertTrue(compilation.messages, compilation.success);
+    String generated = generatedBinding(compilation);
+    assertTrue(
+        generated,
+        generated.contains(
+            "  private final io.nexusrpc.handler.OperationHandler<java.lang.String,"
+                + " java.lang.String> ioHandler;\n"));
+    assertTrue(generated, generated.contains("    return javaHandler;\n"));
   }
 
   @Test
@@ -1838,6 +1893,28 @@ public class ProcessorValidationTest {
   }
 
   @Test
+  public void rejectsMappingsOntoTypedNexusServicesThatAreNotInterfaces() throws IOException {
+    // The same check guards the mapping path, which reaches readService without any fragment.
+    Compilation compilation =
+        compile(
+            "ServiceOnClassMapping",
+            source(
+                "  @Service public static class DeploymentService {\n"
+                    + "    @Operation public String start(String input) { return input; }\n"
+                    + "  }\n"
+                    + workflowInterface("@WorkflowMethod String run(String input);")
+                    + "  static class WorkflowImpl implements WorkflowContract {\n"
+                    + "    @Override\n"
+                    + "    @WorkflowOperation(service = DeploymentService.class,"
+                    + " name = \"start\", workflowId = \"#{input}\")\n"
+                    + "    public String run(String input) { return input; }\n"
+                    + "  }\n"));
+
+    assertFailureContains(
+        compilation, "Typed Nexus service test.TestSource.DeploymentService must be an interface");
+  }
+
+  @Test
   public void rejectsFragmentAnnotationsOnInterfaces() throws IOException {
     Compilation compilation =
         compile(
@@ -1879,6 +1956,20 @@ public class ProcessorValidationTest {
         + "    public OperationHandler<String, String> start() {\n"
         + "      return OperationHandler.sync((context, details, input) -> input);\n"
         + "    }\n"
+        + "  }\n"
+        + "}\n";
+  }
+
+  /** A fragment in the default package, which a binding in package {@code test} cannot name. */
+  private static String defaultPackageFragment() {
+    return "import io.github.quinn_with_two_ns.temporal.nexus.NexusServiceFragment;\n"
+        + "import io.nexusrpc.handler.OperationHandler;\n"
+        + "import io.nexusrpc.handler.OperationImpl;\n"
+        + "@NexusServiceFragment(service = test.TestSource.DeploymentService.class)\n"
+        + "public class DefaultFragment {\n"
+        + "  @OperationImpl\n"
+        + "  public OperationHandler<String, String> start() {\n"
+        + "    return OperationHandler.sync((context, details, input) -> input);\n"
         + "  }\n"
         + "}\n";
   }

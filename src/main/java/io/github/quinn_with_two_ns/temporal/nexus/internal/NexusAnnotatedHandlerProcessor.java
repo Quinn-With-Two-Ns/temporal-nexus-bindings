@@ -52,7 +52,10 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
   private static final String SERVICE_MAPPING = PACKAGE + "ServiceMapping";
   private static final String SERVICE_FRAGMENT = PACKAGE + "NexusServiceFragment";
 
-  /** Fixed processing order so diagnostics and duplicate-mapping precedence are deterministic. */
+  /**
+   * Fixed processing order so diagnostics and duplicate-mapping precedence are deterministic across
+   * annotation types. Ordering within one annotation type comes from {@link #sorted}.
+   */
   private static final List<String> OPERATION_ANNOTATIONS =
       Collections.unmodifiableList(Arrays.asList(WORKFLOW, SIGNAL, QUERY, UPDATE, ACTIVITY));
 
@@ -113,7 +116,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
       if (annotation == null) {
         continue;
       }
-      for (Element element : roundEnvironment.getElementsAnnotatedWith(annotation)) {
+      for (Element element : sorted(roundEnvironment.getElementsAnnotatedWith(annotation))) {
         if (element.getKind() != ElementKind.METHOD) {
           error(element, "Nexus operation annotations are only supported on methods");
           valid = false;
@@ -164,13 +167,29 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     return false;
   }
 
+  /**
+   * Orders annotated elements by declaring element and signature. {@code getElementsAnnotatedWith}
+   * hands back an unordered set, while the first mapping read for an operation wins and the second
+   * is the one reported, so precedence has to come from the elements rather than from javac.
+   */
+  private static List<Element> sorted(Set<? extends Element> elements) {
+    List<Element> ordered = new ArrayList<>(elements);
+    Collections.sort(ordered, Comparator.comparing(element -> elementKey(element)));
+    return ordered;
+  }
+
+  private static String elementKey(Element element) {
+    @Nullable Element enclosing = element.getEnclosingElement();
+    return (enclosing == null ? "" : enclosing + "#") + element;
+  }
+
   private boolean validateServiceMappings(RoundEnvironment roundEnvironment) {
     @Nullable TypeElement mappingAnnotation = elements.getTypeElement(SERVICE_MAPPING);
     if (mappingAnnotation == null) {
       return true;
     }
     boolean valid = true;
-    for (Element element : roundEnvironment.getElementsAnnotatedWith(mappingAnnotation)) {
+    for (Element element : sorted(roundEnvironment.getElementsAnnotatedWith(mappingAnnotation))) {
       if (element.getKind() != ElementKind.CLASS
           || !implementsTemporalInterface((TypeElement) element, new HashSet<String>())) {
         error(
@@ -285,6 +304,18 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     if (Objects.requireNonNull(fragment.getEnclosingElement()).getKind() != ElementKind.PACKAGE
         && !fragment.getModifiers().contains(Modifier.STATIC)) {
       error(fragment, prefix + "be a static nested class");
+      valid = false;
+    }
+    // A fragment in the default package has a bare simple name for a qualified name, which the
+    // binding generated in the service's package cannot resolve.
+    PackageElement servicePackage = elements.getPackageOf(service);
+    if (elements.getPackageOf(fragment).isUnnamed() && !servicePackage.isUnnamed()) {
+      error(
+          fragment,
+          prefix
+              + "be declared in a named package; the binding generated in package "
+              + servicePackage.getQualifiedName()
+              + " cannot name a class in the default package");
       valid = false;
     }
     // The generated binding names the fragment by its qualified name, so every enclosing type has
@@ -917,12 +948,26 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
               + ", "
               + sourceType(operation.operation.outputType)
               + "> "
-              + operation.operation.methodName
+              + handlerField(operation.operation)
               + ";\n");
     }
     if (!service.fragmentOperations.isEmpty()) {
       writer.write("\n");
     }
+  }
+
+  /**
+   * Names the field holding a fragment-provided handler.
+   *
+   * <p>The {@code Handler} suffix keeps the field name away from the package roots the generator
+   * emits in expression position: a field named {@code java} or {@code io} is in scope for the
+   * whole class body and would reclassify the leading identifier of the qualified {@code
+   * java.util.Objects} and {@code io.github...GeneratedNexusOperationHandlers} calls into a field
+   * access (JLS 6.5.2), so the generated source would not compile. Appending a fixed suffix also
+   * keeps distinct operation methods on distinct fields, which capitalizing the name would not.
+   */
+  private static String handlerField(OperationModel operation) {
+    return operation.methodName + "Handler";
   }
 
   private void generateConstructor(
@@ -937,7 +982,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
     // sees the same lifecycle as an annotation-generated handler.
     for (FragmentOperationModel operation : sortedFragmentOperations(service)) {
       String call = operation.fragment.parameterName + "." + operation.operation.methodName + "()";
-      writer.write("    this." + operation.operation.methodName + " =\n");
+      writer.write("    this." + handlerField(operation.operation) + " =\n");
       writer.write("        java.util.Objects.requireNonNull(\n");
       writer.write("            " + call + ",\n");
       writer.write(
@@ -1080,7 +1125,7 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
             + "> "
             + operation.operation.methodName
             + "() {\n");
-    writer.write("    return " + operation.operation.methodName + ";\n");
+    writer.write("    return " + handlerField(operation.operation) + ";\n");
     writer.write("  }\n");
   }
 
@@ -1644,6 +1689,12 @@ public final class NexusAnnotatedHandlerProcessor extends AbstractProcessor {
      * decapitalizes onto one of them is renamed instead. {@code worker} and {@code binding} are the
      * local names {@code register} uses for itself; {@code java} would obscure the {@code java}
      * package in the qualified {@code java.util.Objects} call the constructor emits (JLS 6.4.2).
+     *
+     * <p>This covers the generated parameters only. Handler fields face the same hazard — and a
+     * wider one, since a field is in scope for every method body, including the {@code
+     * io.github...GeneratedNexusOperationHandlers} calls mapped operations emit — so they carry a
+     * fixed suffix instead of a reserved list; see {@link
+     * NexusAnnotatedHandlerProcessor#handlerField}.
      */
     private static final List<String> RESERVED_PARAMETERS =
         Collections.unmodifiableList(Arrays.asList("worker", "binding", "java"));
