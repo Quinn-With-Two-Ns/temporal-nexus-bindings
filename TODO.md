@@ -62,10 +62,15 @@ implementation cost.
 
 ### Control operation failure handling
 
-- [ ] Define an `OperationFailureHandler<R>` extension point that can propagate a Temporal
-      invocation failure, translate it to a Nexus failure, or recover with a successful result.
-- [ ] Add a `failureHandler` class-literal parameter to each operation-mapping annotation, with the
-      standard Temporal-to-Nexus behavior as its default.
+- [ ] Define an `OperationFailureHandler<R>` extension point that receives the operation identity,
+      Nexus start context, input, and Temporal invocation failure, and can propagate the failure,
+      translate it to a Nexus failure, or recover with a successful result.
+- [ ] Add the same `failureHandler` class-literal parameter to every operation-mapping annotation,
+      including activity and update mappings for when they become supported, with the standard
+      Temporal-to-Nexus behavior as its default.
+- [ ] Preserve the current behavior of the generated no-argument `create()` and `register(...)`
+      paths when no custom handler is selected, and add overloads rather than breaking the public
+      runtime factory signatures used by previously generated sources.
 - [ ] Provide built-in handler implementations for:
   - Standard Temporal-to-Nexus failure handling.
   - Ignoring `WorkflowNotFoundException` for `Void` operations.
@@ -74,10 +79,18 @@ implementation cost.
       annotation processing that their result type is compatible with the Nexus operation output.
 - [ ] Reject the ignore-not-found handler on non-`Void` operations; require those operations to use
       a custom handler that supplies an explicit fallback result.
-- [ ] Invoke failure handlers only for failures from the outbound Temporal operation so input
-      expression and option-validation `BAD_REQUEST` failures cannot be swallowed.
-- [ ] Instantiate each configured handler once, document the thread-safety requirement, and add
-      processor, runtime, and end-to-end coverage for default, built-in, and custom behavior.
+- [ ] Invoke failure handlers only around the outbound Temporal call—workflow start submission,
+      signal, query, update, or activity scheduling—so input-expression and option-validation
+      failures cannot be swallowed or reclassified.
+- [ ] Document that workflow handlers can customize failures while submitting the workflow start,
+      but not the eventual failure of the asynchronously completing workflow execution; that
+      failure is delivered by Temporal after the generated start handler has returned.
+- [ ] Instantiate each configured handler once per generated binding, mirroring the cancellation
+      handler lifecycle; require handlers to be thread-safe, pass through deliberate Nexus
+      failures, and map unexpected handler faults to non-retryable Nexus `INTERNAL` errors.
+- [ ] Add processor, handler-factory, and end-to-end coverage for every annotation kind, the default
+      and built-in handlers, custom delegation and recovery, invalid result types, and failures that
+      must bypass the hook.
 
 ### Implement workflow updates
 
