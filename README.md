@@ -279,8 +279,13 @@ fragment instance, as above.
 
 A fragment method must be public, non-static, non-generic, parameterless, declare no thrown
 exceptions, and return `OperationHandler`. Its name must be the name of an operation method on the
-selected typed service, and its handler input and output types must match that operation. The
-processor rejects a service whose operations are not each provided exactly once, naming both
+selected typed service, and its handler input and output types must match that operation.
+
+Because the generated binding names the fragment class, the class itself must be public, concrete,
+non-generic, and declared in a named package; a nested fragment must be static and nested only in
+public classes.
+
+The processor rejects a service whose operations are not each provided exactly once, naming both
 contributing sources for a duplicate.
 
 ## Supported mappings
