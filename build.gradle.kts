@@ -8,7 +8,7 @@ plugins {
     `java-library`
     `maven-publish`
     signing
-    id("com.diffplug.spotless") version "8.8.0"
+    id("com.diffplug.spotless") version "8.9.0"
     id("net.ltgt.errorprone") version "5.1.0"
 }
 
@@ -32,7 +32,7 @@ java {
 
 dependencies {
     api("io.temporal:temporal-sdk:$temporalVersion")
-    api("org.jspecify:jspecify:1.0.0")
+    api("org.jspecify:jspecify:1.0.1")
 
     errorprone("com.google.errorprone:error_prone_core:2.50.0")
     errorprone("com.uber.nullaway:nullaway:0.13.8")
